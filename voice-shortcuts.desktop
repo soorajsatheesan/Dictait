@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Voice Shortcuts
+Comment=Register Super+I for voice dictation (Whisper → clipboard)
+Exec=/home/shadowvic/voice-shortcuts/register-shortcut.sh
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true

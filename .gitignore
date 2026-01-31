@@ -1,0 +1,11 @@
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.log
+logs/*.log
+voice_listener.pid
+.idea/
+.vscode/
+.DS_Store
