@@ -1,5 +1,7 @@
 # Dictait
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Dictait** is a lightweight voice-to-text tool for Linux that brings Windows-style “press a key and dictate” to your desktop. On Windows, **Win+H** turns on built-in speech recognition and types for you; Linux has no native equivalent. Dictait fills that gap: press **Super+I** to start listening, press it again to stop—then your words are transcribed and copied to the clipboard so you can paste them anywhere (email, chat, editor) with **Ctrl+V**.
 
 It targets **Linux on Debian-based distributions** (Ubuntu, Debian, Linux Mint, etc.) and works on both **Wayland** and **X11**. Everything runs locally using the **Whisper** model—no cloud, no account, no telemetry.
@@ -182,7 +184,9 @@ Edit or set before running:
 
 ## License
 
-This project is provided as-is. Use and modify it as you like. Whisper and faster-whisper have their own licenses (see their repositories). Dictait does not include a separate license file; treat the code as open for personal and educational use unless you add a license yourself.
+Dictait is licensed under the [MIT License](LICENSE). You may use, modify, and distribute it under the terms of that license.
+
+Whisper and faster-whisper have their own licenses; see their repositories for details.
 
 ---
 
