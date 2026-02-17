@@ -4,6 +4,7 @@ Record from mic until SIGTERM, then transcribe with Whisper (medium) and copy to
 Started by voice_toggle.py: Super+I = start, Super+I again = stop → transcribe → clipboard.
 """
 import os
+import json
 import signal
 import sys
 import threading
@@ -34,7 +35,14 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
-    PID_FILE.write_text(str(os.getpid()))
+    PID_FILE.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "script": str(Path(__file__).resolve()),
+            }
+        )
+    )
 
     p, stream = open_stream()
     frames = []

@@ -21,7 +21,7 @@ def transcribe(raw_pcm_bytes):
         return ""
     try:
         model = load_model()
-    except ImportError:
+    except Exception:
         return ""
     fd, path = tempfile.mkstemp(suffix=".wav")
     try:
@@ -31,8 +31,11 @@ def transcribe(raw_pcm_bytes):
                 w.setsampwidth(2)
                 w.setframerate(16000)
                 w.writeframes(raw_pcm_bytes)
-        segments, _ = model.transcribe(path, language="en", beam_size=1, vad_filter=True)
-        return " ".join(s.text for s in segments if s.text).strip() or ""
+        try:
+            segments, _ = model.transcribe(path, language="en", beam_size=1, vad_filter=True)
+            return " ".join(s.text for s in segments if s.text).strip() or ""
+        except Exception:
+            return ""
     finally:
         try:
             os.unlink(path)

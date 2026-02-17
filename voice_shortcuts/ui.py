@@ -15,7 +15,10 @@ def show_listening():
     """Show small 'Listening' window. Returns (root, icon_label, text_label) or (None, None, None)."""
     if tk is None:
         return None, None, None
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except Exception:
+        return None, None, None
     root.withdraw()
     root.attributes("-topmost", True)
     root.overrideredirect(True)
