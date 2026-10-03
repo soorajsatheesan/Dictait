@@ -135,7 +135,7 @@ install-macos.sh           Build and install from source
 1. Bump `version` in `desktop/package.json`.
 2. Commit and push to `main`.
 
-The **Release** workflow builds the self-contained disk image and the Linux bundle on an Apple Silicon runner and publishes `vX.Y.Z` with `SHA256SUMS.txt`. Installed copies offer the update from **Settings → Updates**, the website’s download buttons pick it up automatically, and the one-line installer installs it. To build a release by hand instead: `./release.sh --publish soorajsatheesan/Dictait`.
+The **Release** workflow builds the self-contained disk image and the Linux bundle on an Apple Silicon runner and publishes `vX.Y.Z` with `SHA256SUMS.txt`. Installed copies offer the update from **Settings → Updates**, the one-line installer on the website installs it, and the website shows the new version automatically. To build a release by hand instead: `./release.sh --publish soorajsatheesan/Dictait`.
 
 The app is signed locally (ad hoc) with a stable identity, so macOS keeps its permissions across updates. With an Apple Developer ID, set `DICTAIT_SIGN_IDENTITY` and `DICTAIT_NOTARY_PROFILE` and `release.sh` signs, notarizes and staples, which removes the first-launch prompt.
 
