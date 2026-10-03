@@ -1,9 +1,6 @@
 name: Release
 
-# Bump "version" in desktop/package.json and push to main: this builds the Mac disk image and the
-# Linux bundle on an Apple Silicon runner and publishes them as a GitHub Release. Installed copies
-# of Dictait find the release on their next update check (Settings → Updates), and the website's
-# download buttons and one-line installer read it live.
+# Bump desktop/package.json's version and push to main to release all three platforms.
 on:
   push:
     branches: [main]
@@ -11,50 +8,88 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: macos-15
-    timeout-minutes: 90
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.version.outputs.value }}
+      skip: ${{ steps.released.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
       - name: Read the version
         id: version
         run: echo "value=$(node -p "require('./desktop/package.json').version")" >> "$GITHUB_OUTPUT"
-
-      - name: Skip if this version is already released
+      - name: Skip already-published versions
         id: released
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "v${{ steps.version.outputs.value }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release v${{ steps.version.outputs.value }} already exists; nothing to do."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
-
+  windows:
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    uses: ./.github/workflows/windows.yml
+    permissions:
+      contents: write
+  mac:
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: actions/setup-python@v5
-        if: steps.released.outputs.skip != 'true'
         with:
           python-version: '3.12'
-
       - name: Test the speech worker
-        if: steps.released.outputs.skip != 'true'
         run: |
           python -m pip install --quiet numpy
           python -m unittest discover -s macos/tests
-
-      - name: Build and publish
-        if: steps.released.outputs.skip != 'true'
+      - name: Package macOS and Linux
+        run: ./release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-linux-release
+          path: |
+            marketing/downloads/*-mac-arm64.dmg
+            marketing/downloads/*-linux.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: [version, mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-release'
+          path: dist/release
+          merge-multiple: true
+      - name: Verify all platform files and write checksums
+        working-directory: dist/release
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+        run: |
+          test -s "Dictait-$VERSION-mac-arm64.dmg"
+          test -s "Dictait-$VERSION-linux.tar.gz"
+          test -s "Dictait-$VERSION-windows-x64.zip"
+          sha256sum "Dictait-$VERSION-mac-arm64.dmg" "Dictait-$VERSION-linux.tar.gz" "Dictait-$VERSION-windows-x64.zip" > SHA256SUMS.txt
+      - name: Publish all platforms together
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./release.sh --publish "${{ github.repository }}"
+          VERSION: ${{ needs.version.outputs.value }}
+        run: |
+          gh release create "v$VERSION" dist/release/* --repo "${{ github.repository }}" --target "$GITHUB_SHA" --title "Dictait $VERSION" --generate-notes --notes "Local dictation for macOS, Windows and Linux. Mac installs offer the update in Settings → Updates. Windows includes a portable app with first-run model setup; Linux includes the shortcut tool."

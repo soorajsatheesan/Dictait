@@ -31,6 +31,7 @@ uname -s; uname -m; sw_vers -productVersion 2>/dev/null
 | `Darwin`, `x86_64` (Intel Mac) | Stop. Tell the user the desktop app needs Apple Silicon (M1 or later). |
 | `Darwin`, macOS 13 or earlier | Stop. Tell the user to update macOS to 14 (Sonoma) or later. |
 | `Linux` | Follow **section 8 (Linux)**. |
+| Windows 10 or later, 64-bit x86 | Follow **section 9 (Windows)**. Use PowerShell instead of the Unix commands above. |
 
 Check resources and warn the user (but continue) if they are low:
 
@@ -223,3 +224,31 @@ See the Linux section of `README.md` for details.
 ```
 
 This removes the app but keeps the user's notes, the runtime and the models. Delete `~/Library/Application Support/Dictait/` **only if the user explicitly asks** to erase their notes and vocabulary.
+
+
+---
+
+## 9. Windows (lightweight app)
+
+The Windows app runs Whisper locally and copies the result to the clipboard. It does not include the Mac app’s Qwen cleanup, voice editing, notes graph or auto-updater.
+
+1. **Check:** look for an existing extracted `Dictait.exe` folder. Keep one active copy; do not delete `%LOCALAPPDATA%\Dictait`, which holds downloaded models and settings.
+2. Download `Dictait-x.y.z-windows-x64.zip` and `SHA256SUMS.txt` from the [latest release](https://github.com/soorajsatheesan/Dictait/releases/latest). If a Windows asset has not been published, use the source instructions below rather than downloading the Mac disk image.
+3. Verify the ZIP in PowerShell: `Get-FileHash .\Dictait-x.y.z-windows-x64.zip -Algorithm SHA256`; compare it with the matching line in `SHA256SUMS.txt`. Stop if it does not match.
+4. Extract the **whole** ZIP into a user-writable folder and open `Dictait.exe`. `_internal` must remain beside the executable.
+5. **Human: voice-model setup.** Choose Base (fastest, ~150 MB), Small (balanced, ~500 MB) or Medium (more accurate, ~1.5 GB), then click **Download model & finish setup**. This is the one-time Hugging Face download. The indicator runs while downloading and loading; wait for Ready. A failed download can be retried.
+6. **Human: microphone.** If recording reports a microphone error, enable desktop-app access under Windows Settings → Privacy & security → Microphone, and choose a working default input device.
+7. **Human: test.** Keep Dictait open. Press **Ctrl+Alt+Space** in another app, say a sentence, press it again, then **Ctrl+V**. If the shortcut is taken, use the app’s Start/Stop button. Recordings stop after five minutes.
+8. **Updates:** the app’s **Updates on GitHub** link opens the newest release. Close the old app, extract the new ZIP and open it. Models in `%LOCALAPPDATA%\Dictait` stay available. Windows does not install updates automatically.
+
+### Windows from source
+
+Use Python 3.12, 64-bit, then run from the repository root:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python -m pip install -r windows/requirements.txt
+.\.venv\Scripts\python -m windows.app
+```
+
+This runs the app from source; it does not package an executable. Packaging uses `windows/build.ps1` on Windows or the **Windows** GitHub workflow. Follow the user’s instruction before building. See [windows/README.md](windows/README.md).

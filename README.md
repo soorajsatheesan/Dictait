@@ -13,6 +13,7 @@
 <p align="center">
   <a href="https://github.com/soorajsatheesan/Dictait/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/soorajsatheesan/Dictait?color=FF5B36&label=release"></a>
   <img alt="macOS 14+ on Apple Silicon" src="https://img.shields.io/badge/macOS-14%2B%20·%20Apple%20Silicon-151413">
+  <img alt="Windows and Linux lightweight apps" src="https://img.shields.io/badge/Windows%20%26%20Linux-local%20Whisper-151413">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-FF9456"></a>
 </p>
 
@@ -28,10 +29,9 @@
 |---|---|---|
 | **macOS** (Apple Silicon, macOS 14+) | [Dictait for Mac (.dmg)](https://github.com/soorajsatheesan/Dictait/releases/latest) | the one-line installer below |
 | **Linux** (Debian, Ubuntu, Mint) | [Dictait for Linux (.tar.gz)](https://github.com/soorajsatheesan/Dictait/releases/latest) | [Linux version](#linux-version) |
-| **Source** | [Source code (.zip)](https://github.com/soorajsatheesan/Dictait/archive/refs/heads/main.zip) | `git clone` and [SETUP.md](SETUP.md) |
-| **Windows** | Not yet: the speech engine runs on Apple Silicon | |
+| **Windows** (10+, 64-bit x86) | [Dictait for Windows (.zip)](https://github.com/soorajsatheesan/Dictait/releases/latest) | [Windows setup](#windows-version) |
 
-Every release is built and published by GitHub Actions, with a `SHA256SUMS.txt` beside the files.
+The release workflow builds macOS, Windows and Linux downloads on GitHub’s servers, with a `SHA256SUMS.txt` beside the files. macOS has the full app; Windows and Linux are lighter Whisper tools. Source is available through [GitHub](https://github.com/soorajsatheesan/Dictait) or a [ZIP](https://github.com/soorajsatheesan/Dictait/archive/refs/heads/main.zip).
 
 **Apple Silicon Mac (M1 or later), macOS 14 Sonoma or later.**
 
@@ -134,7 +134,9 @@ desktop/                   Electron app: TypeScript, React, Motion
   resources/brand/         The mark and app icon sources
 macos/backend/             The local MLX worker (speech, cleanup, memory); JSON over pipes, no ports
 macos/tests/               Worker and memory tests
-release.sh                 Build the disk image and Linux bundle; publish a GitHub Release
+windows/                   Lightweight Windows app, model setup, global shortcut, portable ZIP
+.github/workflows/         Mac checks, Windows packaging, and releases for all platforms
+release.sh                 Build the Mac disk image and Linux bundle
 install.sh                 Install the latest release (the one-line installer)
 install-macos.sh           Build and install from source
 ```
@@ -144,9 +146,21 @@ install-macos.sh           Build and install from source
 1. Bump `version` in `desktop/package.json`.
 2. Commit and push to `main`.
 
-The **Release** workflow builds the self-contained disk image and the Linux bundle on an Apple Silicon runner and publishes `vX.Y.Z` with `SHA256SUMS.txt`. Installed copies offer the update from **Settings → Updates**, the website’s download buttons and the one-line installer pick it up automatically. To build a release by hand instead: `./release.sh --publish soorajsatheesan/Dictait`.
+The **Release** workflow builds the Mac disk image and Linux bundle on an Apple Silicon runner, and a self-contained Windows ZIP on a Windows runner. It publishes `vX.Y.Z` only after all platforms succeed, with `SHA256SUMS.txt` covering all three. Installed Macs offer the update from **Settings → Updates**; the website’s download buttons and the one-line installer pick it up automatically. Windows and Linux updates are installed manually. `./release.sh` packages Mac and Linux locally; the Windows ZIP is packaged by `windows/build.ps1` on Windows.
+
+To attach the first Windows build to the existing v0.5.0 release, run the **Windows** workflow manually with **publish** enabled. It preserves the Mac/Linux checksums and uploads only the Windows ZIP and the small updated checksum file, all from GitHub’s servers. Later version bumps use **Release** for all platforms together.
 
 The app is signed locally (ad hoc) with a stable identity, so macOS keeps its permissions across updates. With an Apple Developer ID, set `DICTAIT_SIGN_IDENTITY` and `DICTAIT_NOTARY_PROFILE` and `release.sh` signs, notarizes and staples, which removes the first-launch prompt.
+
+---
+
+## Windows version
+
+A lightweight Whisper app for Windows 10 or later (64-bit x86). Download the Windows ZIP from the [latest release](https://github.com/soorajsatheesan/Dictait/releases/latest), extract the entire folder, and open **Dictait.exe**. Python is bundled. The first-run setup lets you download Base (~150 MB), Small (~500 MB) or Medium (~1.5 GB); after that, transcription works offline on your CPU.
+
+Keep Dictait open and press **Ctrl+Alt+Space** in any app to start and stop recording, then **Ctrl+V** to paste. The app button works if another app already uses that shortcut. Audio is deleted after transcription. Models and settings live in `%LOCALAPPDATA%\Dictait`.
+
+Windows currently supports dictation and clipboard copying. Qwen cleanup, voice editing, the notes graph and automatic updates are Mac features. **Updates on GitHub** opens the latest release; replace the extracted app folder to update, keeping your downloaded models. See [windows/README.md](windows/README.md) for setup and source instructions.
 
 ---
 
@@ -168,6 +182,10 @@ The first dictation downloads the Whisper model once. `register-shortcut.sh` bin
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## License
+## Steal our code. Legally.
 
-[MIT](LICENSE). Whisper, Parakeet and Qwen are distributed under their own licenses by their authors.
+Fork it. Remix it. Put your own name on the menu bar. Build the thing you wish this did.
+
+Dictait is [MIT licensed](LICENSE): use it, change it, ship it, even sell it. Keep the copyright and license notice with copies or substantial portions of the code. No permission email required. If you make something useful, we’d love to see it in a pull request.
+
+The models and bundled dependencies keep their own licenses. The MIT license for Dictait does not replace the licenses for Whisper, Parakeet, Qwen or those dependencies.
