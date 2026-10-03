@@ -1,0 +1,31 @@
+appId: org.dictait.mac
+productName: Dictait
+directories:
+  output: ../dist/electron
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+extraResources:
+  - from: ../macos/backend
+    to: backend
+    filter: ["*.py", "memory_graph.html"]
+  - from: build/bin/dictait-helper
+    to: bin/dictait-helper
+  - from: resources/tray
+    to: tray
+  # Downloadable builds carry their own Python (scripts/bundle-python.sh); source builds leave it empty.
+  - from: build/python
+    to: python
+asar: true
+electronLanguages: [en]
+mac:
+  target: dir
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  identity: null
+  hardenedRuntime: false
+  extendInfo:
+    LSUIElement: true
+    LSMinimumSystemVersion: "14.0"
+    NSMicrophoneUsageDescription: Dictait records your voice only when you start dictation. Audio is transcribed on this Mac and then deleted.

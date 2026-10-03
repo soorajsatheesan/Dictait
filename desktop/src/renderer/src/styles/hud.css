@@ -1,0 +1,75 @@
+/* The island: black where it meets the camera notch, then liquid glass: a lit rim, a slow sheen,
+   and the logo's ember glowing along its lower edge. */
+html, body.hud, body.hud #root { background: transparent; }
+body.hud { overflow: hidden; }
+
+.stage { position: fixed; inset: 0; display: flex; justify-content: center; align-items: flex-start; pointer-events: none; }
+
+.island { position: relative; background: #000; color: #fff; will-change: width, height; }
+/* Inverse corners flare into the top edge, like the notch itself. */
+.island::before, .island::after { content: ''; position: absolute; top: 0; width: 12px; height: 12px; pointer-events: none; }
+.island::before { left: -12px; background: radial-gradient(circle at 0 100%, transparent 11.5px, #000 12px); }
+.island::after { right: -12px; background: radial-gradient(circle at 100% 100%, transparent 11.5px, #000 12px); }
+.island-clip {
+  position: absolute; inset: 0; overflow: hidden;
+  background:
+    radial-gradient(120% 70% at 50% 128%, rgba(255, 91, 54, 0.42), rgba(255, 148, 86, 0.12) 46%, transparent 72%),
+    linear-gradient(180deg, #000 0, #000 var(--notch, 0px), #0B0A0A calc(var(--notch, 0px) + 18px), #15110F 100%);
+  box-shadow:
+    inset 0 -1px 0 rgba(255, 190, 150, 0.28),
+    inset 1px 0 0 rgba(255, 255, 255, 0.05), inset -1px 0 0 rgba(255, 255, 255, 0.05),
+    0 18px 40px -12px rgba(0, 0, 0, 0.55), 0 6px 18px -8px rgba(255, 91, 54, 0.35);
+}
+/* A sheen that drifts across the glass while the island is open. */
+.island-clip::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, 0.07) 45%, transparent 60%);
+  background-size: 260% 100%; animation: sheen 5.5s ease-in-out infinite;
+}
+@keyframes sheen { from { background-position: 130% 0; } to { background-position: -130% 0; } }
+.island.flat .island-clip { box-shadow: inset 0 -1px 0 rgba(255, 190, 150, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 18px 40px -12px rgba(0, 0, 0, 0.5), 0 6px 18px -8px rgba(255, 91, 54, 0.35); }
+.island-content { position: absolute; top: 0; left: 0; right: 0; transform-origin: 50% 0; }
+
+.island-row { display: flex; align-items: center; justify-content: center; gap: 11px; padding: 0 20px; }
+.island-row.kind-failed { justify-content: flex-start; }
+.island-recording .island-row { justify-content: flex-start; gap: 12px; padding: 0 16px 0 18px; }
+.live-mark { width: 15px; height: 18px; flex: none; filter: drop-shadow(0 0 6px rgba(255, 110, 60, 0.55)); }
+.live-mark.editing { filter: drop-shadow(0 0 6px rgba(255, 220, 190, 0.6)) saturate(0.4) brightness(1.5); }
+.waveform { flex: 1; display: block; }
+.island-time { font: 600 13px/1 var(--font-ui); font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.86); min-width: 34px; text-align: right; }
+.island-time.late { color: #FF9456; }
+.island-sub { display: flex; align-items: center; justify-content: center; gap: 6px; height: 22px; margin-top: -6px; padding: 0 20px; font-size: 11px; color: rgba(255, 255, 255, 0.5); white-space: nowrap; }
+.island-sub kbd { padding: 1px 5px; border-radius: 4px; font: 600 10px/1.4 var(--font-ui); color: rgba(255, 255, 255, 0.8); background: rgba(255, 255, 255, 0.12); }
+.island-sub .sep { width: 3px; height: 3px; margin: 0 4px; border-radius: 50%; background: rgba(255, 255, 255, 0.3); }
+.island-sub.note { color: #FF9456; }
+.island-sub.editing { color: #FFD3B8; }
+.island-sub.live { justify-content: stretch; }
+.live-text { display: flex; justify-content: flex-end; width: 100%; overflow: hidden; font-size: 12.5px; color: rgba(255, 255, 255, 0.82); -webkit-mask-image: linear-gradient(90deg, transparent, #000 22%); mask-image: linear-gradient(90deg, transparent, #000 22%); }
+.live-inner { white-space: nowrap; }
+
+.island-icon { display: grid; place-items: center; width: 22px; height: 22px; flex: none; color: rgba(255, 255, 255, 0.9); }
+.island-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.island-title { font: 620 13.5px/1.2 var(--font-ui); letter-spacing: -0.005em; white-space: nowrap; }
+.island-detail { font-size: 11.5px; line-height: 1.35; color: rgba(255, 255, 255, 0.55); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.kind-done .island-icon, .kind-copied .island-icon { color: #3DD68C; }
+.kind-failed .island-icon, .kind-empty .island-icon { color: #F5B544; }
+.kind-cancelled .island-icon { color: rgba(255, 255, 255, 0.6); }
+.kind-cleaning .island-icon { color: #FF9456; }
+.kind-microphone .island-icon { color: #FF5B36; }
+
+.shimmer { background: linear-gradient(90deg, rgba(255, 255, 255, 0.45) 0%, #fff 45%, rgba(255, 255, 255, 0.45) 90%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.5s linear infinite; }
+@keyframes shimmer { from { background-position: 120% 0; } to { background-position: -100% 0; } }
+
+.spinner { position: relative; width: 16px; height: 16px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0deg, #FF5B36 300deg, #FF9456 360deg); animation: spin 0.8s linear infinite; -webkit-mask: radial-gradient(circle, transparent 5.5px, #000 6px); mask: radial-gradient(circle, transparent 5.5px, #000 6px); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.check-draw { overflow: visible; }
+.check-circle { fill: rgba(61, 214, 140, 0.16); stroke: #3DD68C; stroke-width: 1.6; stroke-dasharray: 57; stroke-dashoffset: 57; animation: draw 0.45s cubic-bezier(0.23, 1, 0.32, 1) forwards; }
+.check-path { fill: none; stroke: #3DD68C; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw 0.3s 0.22s cubic-bezier(0.23, 1, 0.32, 1) forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+
+/* Preview backdrop: a desktop with a menu bar, for judging the island in context. */
+body[data-backdrop] { background: linear-gradient(160deg, #3a4a6b 0%, #b57a8c 55%, #f0b48a 100%) !important; }
+body[data-backdrop='light'] { background: linear-gradient(160deg, #cfe0f5 0%, #f3d9e4 55%, #fde9d6 100%) !important; }
+body[data-backdrop]::before { content: ''; position: fixed; top: 0; left: 0; right: 0; height: 32px; background: rgba(255, 255, 255, 0.22); backdrop-filter: blur(20px); }
+body[data-backdrop='light']::before { background: rgba(255, 255, 255, 0.5); }

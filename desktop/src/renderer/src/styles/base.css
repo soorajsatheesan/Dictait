@@ -1,0 +1,130 @@
+/* Dictait — "Graphite & Ember".
+   Cool graphite neutrals so the one warm color, ember, always means voice, live, or yours. */
+
+:root {
+  color-scheme: light dark;
+
+  --font-display: 'Bricolage Grotesque Variable', ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --ember: #F4522B;
+  --ember-hi: #FF7246;
+  --ember-text: #CF3D16;
+  --ember-soft: rgba(244, 82, 43, 0.10);
+  --ember-line: rgba(244, 82, 43, 0.32);
+  /* The logo's own gradient: apricot to ember. */
+  --ember-gradient: linear-gradient(90deg, #FF9456 0%, #FF5B36 58%, #F2401F 100%);
+  --apricot: #FF9456;
+  --on-ember: #FFFFFF;
+
+  --bg: #F6F6F7;
+  --bg-sidebar: #EDEDEF;
+  --surface: #FFFFFF;
+  --surface-2: #F1F1F3;
+  --surface-3: #E7E7EA;
+  --inverse: #141518;
+  --on-inverse: #F4F4F5;
+  --line: rgba(17, 18, 22, 0.075);
+  --line-strong: rgba(17, 18, 22, 0.13);
+  --text: #131417;
+  --text-2: #5B5D66;
+  --text-3: #8E909A;
+  --good: #16A36A;
+  --warn: #C27A05;
+  --bad: #D93A3A;
+
+  --shadow-sm: 0 1px 2px rgba(16, 17, 20, 0.06), 0 0 0 1px rgba(16, 17, 20, 0.04);
+  --shadow-md: 0 1px 2px rgba(16, 17, 20, 0.05), 0 6px 20px -6px rgba(16, 17, 20, 0.14), 0 0 0 1px rgba(16, 17, 20, 0.05);
+  --shadow-lg: 0 24px 60px -18px rgba(16, 17, 20, 0.32), 0 0 0 1px rgba(16, 17, 20, 0.06);
+  --focus: 0 0 0 3px rgba(244, 82, 43, 0.28);
+
+  --kind-person: #2F7FE0;
+  --kind-project: #E8521C;
+  --kind-organization: #8A5CF0;
+  --kind-technical: #0FA388;
+  --kind-topic: #C98A00;
+  --kind-term: #7C8190;
+
+  --radius-sm: 7px;
+  --radius: 11px;
+  --radius-lg: 16px;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ember: #FF6233;
+    --ember-hi: #FF8A5C;
+    --ember-text: #FF8A5C;
+    --ember-soft: rgba(255, 98, 51, 0.13);
+    --ember-line: rgba(255, 98, 51, 0.38);
+
+    --bg: #0E0F11;
+    --bg-sidebar: #08090A;
+    --surface: #16171A;
+    --surface-2: #1C1D21;
+    --surface-3: #25272C;
+    --inverse: #F2F2F4;
+    --on-inverse: #121316;
+    --line: rgba(255, 255, 255, 0.065);
+    --line-strong: rgba(255, 255, 255, 0.11);
+    --text: #EDEDEF;
+    --text-2: #A3A5AE;
+    --text-3: #6D7079;
+    --good: #3DD68C;
+    --warn: #F5B544;
+    --bad: #FF6464;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -8px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --shadow-lg: 0 30px 70px -20px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    --focus: 0 0 0 3px rgba(255, 98, 51, 0.35);
+
+    --kind-person: #5EB0FF;
+    --kind-project: #FF7A4D;
+    --kind-organization: #B79BFF;
+    --kind-technical: #3DD6B0;
+    --kind-topic: #F5C451;
+    --kind-term: #9AA0AE;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+/* Clear, so the window's vibrancy shows through the sidebar; the content paints its own ground. */
+body {
+  background: transparent;
+  color: var(--text);
+  font: 13px/1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv11', 'ss01';
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+input, textarea { font: inherit; color: inherit; }
+::selection { background: var(--ember-soft); color: inherit; }
+:focus { outline: none; }
+:focus-visible { outline: none; box-shadow: var(--focus); }
+
+.display { font-family: var(--font-display); font-optical-sizing: auto; letter-spacing: -0.02em; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.eyebrow { font-size: 10.5px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+.muted { color: var(--text-2); }
+.faint { color: var(--text-3); }
+.selectable { user-select: text; cursor: text; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+*:hover::-webkit-scrollbar-thumb { background-color: var(--line-strong); }
+::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+}

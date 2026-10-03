@@ -12,3 +12,15 @@ voice_listener.pid
 .idea/
 .vscode/
 .DS_Store
+dist/
+.pytest_cache/
+desktop/node_modules/
+desktop/out/
+desktop/build/bin/
+desktop/build/python/
+desktop/build/cache/
+# The website is its own repository (deployed to Vercel).
+marketing/
+
+# Local assistant settings.
+.claude/

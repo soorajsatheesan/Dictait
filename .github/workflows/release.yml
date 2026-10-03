@@ -1,0 +1,60 @@
+name: Release
+
+# Bump "version" in desktop/package.json and push to main: this builds the Mac disk image and the
+# Linux bundle on an Apple Silicon runner and publishes them as a GitHub Release. Installed copies
+# of Dictait find the release on their next update check (Settings → Updates), and the website's
+# download buttons read it live.
+on:
+  push:
+    branches: [main]
+    paths: [desktop/package.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Read the version
+        id: version
+        run: echo "value=$(node -p "require('./desktop/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already released
+        id: released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.value }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release v${{ steps.version.outputs.value }} already exists; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.released.outputs.skip != 'true'
+        with:
+          python-version: '3.12'
+
+      - name: Test the speech worker
+        if: steps.released.outputs.skip != 'true'
+        run: |
+          python -m pip install --quiet numpy
+          python -m unittest discover -s macos/tests
+
+      - name: Build and publish
+        if: steps.released.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./release.sh --publish "${{ github.repository }}"
