@@ -24,6 +24,15 @@
 
 ## Install
 
+| Platform | Download | Or |
+|---|---|---|
+| **macOS** (Apple Silicon, macOS 14+) | [Dictait for Mac (.dmg)](https://github.com/soorajsatheesan/Dictait/releases/latest) | the one-line installer below |
+| **Linux** (Debian, Ubuntu, Mint) | [Dictait for Linux (.tar.gz)](https://github.com/soorajsatheesan/Dictait/releases/latest) | [Linux version](#linux-version) |
+| **Source** | [Source code (.zip)](https://github.com/soorajsatheesan/Dictait/archive/refs/heads/main.zip) | `git clone` and [SETUP.md](SETUP.md) |
+| **Windows** | Not yet: the speech engine runs on Apple Silicon | |
+
+Every release is built and published by GitHub Actions, with a `SHA256SUMS.txt` beside the files.
+
 **Apple Silicon Mac (M1 or later), macOS 14 Sonoma or later.**
 
 ### One line, no prompts
@@ -135,7 +144,7 @@ install-macos.sh           Build and install from source
 1. Bump `version` in `desktop/package.json`.
 2. Commit and push to `main`.
 
-The **Release** workflow builds the self-contained disk image and the Linux bundle on an Apple Silicon runner and publishes `vX.Y.Z` with `SHA256SUMS.txt`. Installed copies offer the update from **Settings → Updates**, the one-line installer on the website installs it, and the website shows the new version automatically. To build a release by hand instead: `./release.sh --publish soorajsatheesan/Dictait`.
+The **Release** workflow builds the self-contained disk image and the Linux bundle on an Apple Silicon runner and publishes `vX.Y.Z` with `SHA256SUMS.txt`. Installed copies offer the update from **Settings → Updates**, the website’s download buttons and the one-line installer pick it up automatically. To build a release by hand instead: `./release.sh --publish soorajsatheesan/Dictait`.
 
 The app is signed locally (ad hoc) with a stable identity, so macOS keeps its permissions across updates. With an Apple Developer ID, set `DICTAIT_SIGN_IDENTITY` and `DICTAIT_NOTARY_PROFILE` and `release.sh` signs, notarizes and staples, which removes the first-launch prompt.
 

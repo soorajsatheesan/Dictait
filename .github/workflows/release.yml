@@ -2,8 +2,8 @@ name: Release
 
 # Bump "version" in desktop/package.json and push to main: this builds the Mac disk image and the
 # Linux bundle on an Apple Silicon runner and publishes them as a GitHub Release. Installed copies
-# of Dictait find the release on their next update check (Settings → Updates), and the one-line
-# installer the website offers installs it.
+# of Dictait find the release on their next update check (Settings → Updates), and the website's
+# download buttons and one-line installer read it live.
 on:
   push:
     branches: [main]

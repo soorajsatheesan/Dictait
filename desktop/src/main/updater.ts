@@ -78,7 +78,7 @@ export class Updater {
     if (!app.isPackaged) { this.report({ phase: 'failed', error: 'Updates install into the packaged app, not a development build.' }); return }
     const bundle = appBundle()
     try { accessSync(dirname(bundle), constants.W_OK) } catch {
-      this.report({ phase: 'failed', error: `Dictait can’t write to ${dirname(bundle)}. Run the install command from the website instead.` })
+      this.report({ phase: 'failed', error: `Dictait can’t write to ${dirname(bundle)}. Download it from the website instead.` })
       return
     }
     this.busy = true
