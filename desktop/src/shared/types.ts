@@ -10,6 +10,8 @@ export type Language = 'auto' | 'en' | 'hi'
 
 /** How Dictait writes in each kind of app. */
 export interface Tones {
+  /** AI assistants and coding agents: ChatGPT, Claude, Codex, Claude Code. */
+  ai: string
   messaging: string
   email: string
   code: string

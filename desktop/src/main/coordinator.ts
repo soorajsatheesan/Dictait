@@ -38,11 +38,35 @@ const SPACE = 49, KEY_V = 9
 
 /** Which tone applies in which app, by bundle identifier. */
 const toneApps: Record<keyof Tones, RegExp> = {
+  ai: /^(com\.openai\.chat|com\.openai\.codex|com\.anthropic\.claudefordesktop|com\.t3tools\.t3code|com\.google\.GeminiMacOS|ai\.perplexity\.mac)$/,
   messaging: /^(com\.apple\.MobileSMS|com\.tinyspeck\.slackmacgap|net\.whatsapp\.WhatsApp|desktop\.WhatsApp|com\.hnc\.Discord|ru\.keepcoder\.Telegram|org\.telegram\.desktop|com\.facebook\.archon|com\.microsoft\.teams2?|us\.zoom\.xos|com\.apple\.iChat)$/,
   email: /^(com\.apple\.mail|com\.microsoft\.Outlook|com\.readdle\.smartemail-Mac|com\.superhuman\.electron|it\.bloop\.airmail2|com\.mimestream\.Mimestream)$/,
-  code: /^(com\.microsoft\.VSCode|com\.todesktop\.230313mzl4w4u92|com\.apple\.dt\.Xcode|com\.jetbrains\..*|com\.apple\.Terminal|com\.googlecode\.iterm2|dev\.warp\.Warp-Stable|com\.sublimetext\.4|dev\.zed\.Zed|com\.exafunction\.windsurf|com\.openai\.chat|com\.anthropic\.claudefordesktop)$/,
+  code: /^(com\.microsoft\.VSCode|com\.todesktop\.230313mzl4w4u92|com\.apple\.dt\.Xcode|com\.jetbrains\..*|com\.apple\.Terminal|com\.googlecode\.iterm2|dev\.warp\.Warp-Stable|com\.sublimetext\.4|dev\.zed\.Zed|com\.exafunction\.windsurf|com\.mitchellh\.ghostty)$/,
   docs: /^(com\.apple\.Notes|notion\.id|md\.obsidian|com\.microsoft\.Word|com\.apple\.iWork\.Pages|com\.apple\.TextEdit|net\.shinyfrog\.bear|com\.craft\.craft|com\.ulyssesapp\.mac)$/
 }
+
+/** In a browser the tab decides, by its window title. */
+const browsers = /^(com\.apple\.Safari|com\.google\.Chrome|com\.brave\.Browser|company\.thebrowser\.(Browser|dia)|org\.mozilla\.firefox|com\.microsoft\.edgemac|com\.operasoftware\.Opera|com\.vivaldi\.Vivaldi|ai\.perplexity\.comet)$/
+const tabTitles: [keyof Tones, RegExp][] = [
+  ['ai', /\b(ChatGPT|Claude|Gemini|Perplexity|Codex|T3 Chat|Grok|Copilot)\b/i],
+  ['email', /\b(Gmail|Outlook|Proton Mail|Fastmail|Superhuman|Hey\.com)\b|\bInbox\b/i],
+  ['messaging', /\b(Slack|WhatsApp|Discord|Messenger|Telegram|Microsoft Teams)\b/i],
+  ['docs', /\b(Google Docs|Notion|Confluence|Coda|Dropbox Paper|Quip)\b/i]
+]
+/** A terminal running an AI coding agent: Claude Code marks its title with ✳. */
+const agentTitles = /✳|\b(claude|codex|gemini|aider|opencode)\b/i
+
+/** The kind of app the text is going into, for its tone and how Dictait writes there. */
+export function appKind(bundle: string, title = ''): keyof Tones | '' {
+  if (browsers.test(bundle)) return tabTitles.find(([, pattern]) => pattern.test(title))?.[0] ?? ''
+  for (const [kind, pattern] of Object.entries(toneApps) as [keyof Tones, RegExp][]) {
+    if (pattern.test(bundle)) return kind === 'code' && agentTitles.test(title) ? 'ai' : kind
+  }
+  return ''
+}
+
+/** "Hey, make that shorter" works on the last dictation for this long after it was pasted. */
+const FOLLOW_UP_MS = 2 * 60 * 1000
 
 export class Coordinator extends EventEmitter {
   stored: Stored = loadSettings()
@@ -72,6 +96,8 @@ export class Coordinator extends EventEmitter {
   private pressStarted = false
   private holdTimer: NodeJS.Timeout | null = null
   private bluetoothTipShown = false
+  /** The last dictation pasted where it started, for spoken follow-ups. */
+  private lastPasted: { text: string; at: number } | null = null
 
   constructor() {
     super()
@@ -270,9 +296,11 @@ export class Coordinator extends EventEmitter {
   /** Context before the cursor, the selection (for voice edits) and the app (for tone). */
   private async inspectTarget(): Promise<void> {
     const own = await this.ownFocus()
+    if (own !== null) this.helper.forget()
+    // The helper remembers this text field: the words go back here even if the user clicks away.
     const target = own !== null
-      ? { app: 'org.dictait.mac', appName: 'Dictait', editable: own, before: '', selected: '' }
-      : await this.helper.focus()
+      ? { app: 'org.dictait.mac', appName: 'Dictait', editable: own, before: '', selected: '', window: '' }
+      : await this.helper.focus(true)
     if (!target || this.state.phase !== 'recording') return
     this.target = target
     const editing = this.stored.voiceEdits && target.editable === true && !target.secure && target.selected.trim().length > 0
@@ -345,19 +373,13 @@ export class Coordinator extends EventEmitter {
     }
   }
 
-  private toneFor(bundle: string): string {
-    if (!this.stored.appTones || !bundle) return ''
-    for (const [kind, pattern] of Object.entries(toneApps) as [keyof Tones, RegExp][]) {
-      if (pattern.test(bundle)) return this.stored.tones[kind]
-    }
-    return ''
-  }
-
   private requestOptions(): Record<string, unknown> {
     const { language, cleanup, memoryMode, smartFormatting, writingStyle, learnCorrections, useContext } = this.stored
     const target = this.target
-    const tone = target ? this.toneFor(target.app) : ''
+    const kind = target && this.stored.appTones ? appKind(target.app, target.window) : ''
+    const tone = kind ? this.stored.tones[kind] : ''
     const style = [writingStyle.slice(0, 300), tone && `In ${target?.appName}: ${tone}`].filter(Boolean).join('\n')
+    const last = this.lastPasted && Date.now() - this.lastPasted.at < FOLLOW_UP_MS ? this.lastPasted.text : ''
     return {
       language, cleanup: cleanup && this.cleanupAvailable,
       vocabulary: this.personal.vocabulary.map(({ word, alias }) => ({ word, alias })),
@@ -365,7 +387,10 @@ export class Coordinator extends EventEmitter {
       examples: learnCorrections ? this.personal.examples.map(({ original, corrected }) => ({ original, corrected })) : [],
       // Text before the cursor never leaves this Mac and is never saved.
       context: useContext && target?.editable && !target.secure ? target.before.slice(-500) : '',
-      selection: this.live.editing && target ? target.selected.slice(0, 6000) : ''
+      selection: this.live.editing && target ? target.selected.slice(0, 6000) : '',
+      app_kind: kind,
+      // Only for "hey, make that shorter"; never saved.
+      previous_output: last.slice(0, 6000)
     }
   }
 
@@ -452,11 +477,14 @@ export class Coordinator extends EventEmitter {
         this.pieceFiles.clear()
         const text = typeof event.text === 'string' ? event.text : ''
         const edit = event.mode === 'edit'
+        const warning = typeof event.warning === 'string' ? event.warning : ''
+        if (event.mode === 'followup') { void this.followUp(text, warning); return }
         if (!text) {
-          this.setPhase('ready', edit ? `Selection unchanged. ${typeof event.warning === 'string' ? event.warning : ''}`.trim()
+          this.setPhase('ready', edit ? `Selection unchanged. ${warning}`.trim()
             : 'No speech detected. Move closer to the microphone and try again.')
           return
         }
+        const followed = Number(event.instructions ?? 0)
         const detected = typeof event.language === 'string' && event.language ? event.language : this.state.detectedLanguage
         if (detected !== this.stored.detectedLanguage) this.store({ detectedLanguage: detected })
         const total = Number(event.total_ms ?? 0) / 1000, stt = Number(event.stt_ms ?? 0) / 1000
@@ -464,15 +492,18 @@ export class Coordinator extends EventEmitter {
         this.update({
           transcript: text, detectedLanguage: detected, history,
           timing: `${total.toFixed(2)} s total · ${stt.toFixed(2)} s transcription`,
-          notice: typeof event.warning === 'string' ? event.warning : ''
+          notice: warning
         })
-        void this.deliver(text).then((outcome) => {
+        const own = this.target?.app === 'org.dictait.mac'
+        void (own ? this.deliver(text) : this.deliverBack(text)).then((outcome) => {
           if (this.stored.autoPaste && !this.state.accessibilityAllowed) {
             this.update({ notice: 'Enable Dictait in Privacy & Security → Accessibility to paste automatically. Your text is on the clipboard.' })
           }
-          this.setPhase('ready', outcome === 'pasted' ? (edit ? 'Replaced. Control–Space to dictate again.' : 'Pasted. Control–Space to dictate again.')
+          const done = edit ? 'Replaced.' : followed ? `Pasted, following your instruction${followed > 1 ? 's' : ''}.` : 'Pasted.'
+          this.setPhase('ready', outcome === 'pasted' ? `${done} Control–Space to dictate again.`
             : outcome === 'no-target' ? 'Copied. No text box was in focus, so press Command–V where you want it.'
-              : 'Copied. Press Command–V to paste.')
+              : outcome === 'gone' ? 'Copied. The text box you started in is gone, so press Command–V where you want it.'
+                : 'Copied. Press Command–V to paste.')
           this.emit('archive')
         })
         break
@@ -516,6 +547,41 @@ export class Coordinator extends EventEmitter {
     // Nothing to type into: leave the words on the clipboard instead of pasting into thin air.
     if ((await this.focusTarget()) === 'none') return 'no-target'
     return (await this.helper.paste()) ? 'pasted' : 'copied'
+  }
+
+  /**
+   * Pastes where the dictation started, even if the user has clicked somewhere else since:
+   * Dictait goes back to that text field, pastes, and returns them. Without a remembered field
+   * (none had focus at the start), it pastes wherever the cursor is now.
+   */
+  private async deliverBack(text: string): Promise<'pasted' | 'copied' | 'no-target' | 'gone'> {
+    this.lastPasted = null
+    await this.copyText(text)
+    if (!this.stored.autoPaste) return 'copied'
+    const trusted = systemPreferences.isTrustedAccessibilityClient(false)
+    this.update({ accessibilityAllowed: trusted })
+    if (!trusted) return 'copied'
+    const outcome = await this.helper.deliver(text)
+    if (outcome === 'no-anchor') return this.deliver(text)
+    if (outcome === 'pasted') this.lastPasted = { text, at: Date.now() }
+    return outcome === 'pasted' || outcome === 'gone' ? outcome : 'copied'
+  }
+
+  /** "Hey, make that shorter": the last dictation, rewritten in place if it is untouched. */
+  private async followUp(text: string, warning: string): Promise<void> {
+    const last = this.lastPasted
+    if (!text || !last) {
+      this.setPhase('ready', warning || 'Nothing recent to apply that to. Dictate the text and the instruction together.')
+      return
+    }
+    await this.copyText(text)
+    this.update({ transcript: text, notice: '', history: [{ text: text.trim(), at: Date.now(), app: this.target?.appName ?? '' }, ...this.state.history].slice(0, 10) })
+    const outcome = systemPreferences.isTrustedAccessibilityClient(false) ? await this.helper.replaceLast(last.text, text) : 'untrusted'
+    if (outcome === 'replaced') this.lastPasted = { text, at: Date.now() }
+    this.setPhase('ready', outcome === 'replaced' ? 'Updated your last dictation. Control–Space to dictate again.'
+      : outcome === 'changed' ? 'That text has changed since, so the new version is on the clipboard. Press Command–V to use it.'
+        : 'Copied the new version. Press Command–V where you want it.')
+    this.emit('archive')
   }
 
   /** 'none' only when we are confident no editable text has focus; unknown cases still paste. */

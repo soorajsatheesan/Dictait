@@ -1,6 +1,7 @@
 // Dictait's native companion, for what Electron cannot do itself:
 // global shortcuts with press *and* release (hold-to-talk), reading the focused text field
-// (context, selection), sending ⌘V, and describing microphones and the camera notch.
+// (context, selection), sending ⌘V back to where a dictation started, and describing
+// microphones and the camera notch.
 // It runs as a child of Dictait.app, so macOS applies the app's Accessibility permission.
 //
 //   dictait-helper serve            JSON lines on stdin/stdout (requests, replies, hotkey events)
@@ -64,30 +65,97 @@ func paste() -> Bool {
 
 // MARK: - Focused element
 
+func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+}
+
+func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+    guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+
+func focusedElement() -> AXUIElement? {
+    let system = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(system, 0.3)
+    guard let element = elementAttribute(system, kAXFocusedUIElementAttribute) else { return nil }
+    AXUIElementSetMessagingTimeout(element, 0.3)
+    return element
+}
+
+func selectedRange(_ element: AXUIElement) -> CFRange? {
+    guard let value = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    var range = CFRange()
+    return AXValueGetValue(value as! AXValue, .cfRange, &range) ? range : nil
+}
+
+@discardableResult
+func setSelectedRange(_ element: AXUIElement, _ range: CFRange) -> Bool {
+    var range = range
+    guard let value = AXValueCreate(.cfRange, &range) else { return false }
+    return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success
+}
+
+/// The element's text in a range; some editors only expose their whole value, which is sliced
+/// when it is a reasonable size.
+func text(_ element: AXUIElement, in range: CFRange) -> String? {
+    guard range.location >= 0, range.length >= 0 else { return nil }
+    if range.length == 0 { return "" }
+    var wanted = range
+    if let parameter = AXValueCreate(.cfRange, &wanted) {
+        var value: CFTypeRef?
+        if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &value) == .success,
+           let value = value as? String {
+            return value
+        }
+    }
+    guard let whole = attribute(element, kAXValueAttribute) as? String else { return nil }
+    let all = whole as NSString
+    guard all.length < 500_000, range.location + range.length <= all.length else { return nil }
+    return all.substring(with: NSRange(location: range.location, length: range.length))
+}
+
+/// Where a dictation started: its text goes back here even if the user clicks somewhere else
+/// while it is being transcribed.
+struct Place {
+    let pid: pid_t
+    let element: AXUIElement
+    let window: AXUIElement?
+    var range: CFRange?
+    /// Text just before the range, to tell whether the cursor's spot still means the same place.
+    var before = ""
+}
+
+var anchor: Place?
+/// Dictait's last insertion, for spoken follow-ups such as "hey, make that shorter".
+var lastInsertion: Place?
+
+func place(of element: AXUIElement) -> Place? {
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+    let window = elementAttribute(element, kAXWindowAttribute)
+        ?? elementAttribute(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute)
+    return Place(pid: pid, element: element, window: window, range: selectedRange(element))
+}
+
 /// Describes the focused element. "editable" is true, false, or null when unsure; only a
 /// confident false makes Dictait copy instead of paste. Text near the cursor and the current
-/// selection are read for context and voice edits, never from password fields.
-func focus() -> [String: Any] {
+/// selection are read for context and voice edits, never from password fields. With
+/// `anchoring`, the element is remembered as where the coming dictation belongs.
+func focus(anchoring: Bool = false) -> [String: Any] {
     let front = NSWorkspace.shared.frontmostApplication
     var result: [String: Any] = [
         "app": front?.bundleIdentifier ?? "", "appName": front?.localizedName ?? "",
-        "editable": NSNull(), "before": "", "selected": ""
+        "editable": NSNull(), "before": "", "selected": "", "window": ""
     ]
-    guard AXIsProcessTrusted() else { return result }
-    let system = AXUIElementCreateSystemWide()
-    AXUIElementSetMessagingTimeout(system, 0.3)
-    var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value) == .success,
-          let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return result }
-    let element = value as! AXUIElement
-    AXUIElementSetMessagingTimeout(element, 0.3)
-    func string(_ name: String) -> String {
-        var raw: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success else { return "" }
-        return raw as? String ?? ""
-    }
+    if anchoring { anchor = nil }
+    guard AXIsProcessTrusted(), let element = focusedElement() else { return result }
+    func string(_ name: String) -> String { attribute(element, name) as? String ?? "" }
     let role = string(kAXRoleAttribute), subrole = string(kAXSubroleAttribute)
     result["role"] = role
+    var found = place(of: element)
+    // The window title tells a browser's Gmail from its ChatGPT; it is never saved.
+    if let window = found?.window { result["window"] = String((attribute(window, kAXTitleAttribute) as? String ?? "").prefix(200)) }
     let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
     let controls: Set<String> = [
         "AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXSlider", "AXIncrementor",
@@ -103,32 +171,147 @@ func focus() -> [String: Any] {
         result["editable"] = false
         return result
     } else {
+        if anchoring { anchor = found }
         return result
     }
-    if subrole == "AXSecureTextField" { result["secure"] = true; return result }
-    result["selected"] = String(string(kAXSelectedTextAttribute).prefix(8000))
-    var rangeValue: CFTypeRef?
-    if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success,
-       let rangeValue, CFGetTypeID(rangeValue) == AXValueGetTypeID() {
-        var selection = CFRange()
-        AXValueGetValue(rangeValue as! AXValue, .cfRange, &selection)
-        let start = max(0, selection.location - 600)
-        var wanted = CFRange(location: start, length: selection.location - start)
-        if wanted.length > 0, let parameter = AXValueCreate(.cfRange, &wanted) {
-            var text: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &text) == .success,
-               let text = text as? String {
-                result["before"] = text
-            } else {
-                // Some editors only expose the whole value; slice it when it is a reasonable size.
-                let whole = string(kAXValueAttribute) as NSString
-                if whole.length < 500_000, start + wanted.length <= whole.length {
-                    result["before"] = whole.substring(with: NSRange(location: start, length: wanted.length))
-                }
-            }
-        }
+    if subrole == "AXSecureTextField" {
+        result["secure"] = true
+        if anchoring { anchor = found }
+        return result
     }
+    result["selected"] = String(string(kAXSelectedTextAttribute).prefix(8000))
+    if let selection = found?.range {
+        let start = max(0, selection.location - 600)
+        result["before"] = text(element, in: CFRange(location: start, length: selection.location - start)) ?? ""
+    }
+    found?.before = result["before"] as? String ?? ""
+    if anchoring { anchor = found }
     return result
+}
+
+// MARK: - Delivery to where the dictation started
+
+func isFrontmost(_ pid: pid_t) -> Bool {
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.3)
+    return (attribute(app, kAXFrontmostAttribute) as? Bool) == true
+}
+
+func isFocused(_ element: AXUIElement) -> Bool {
+    guard let current = focusedElement() else { return false }
+    return CFEqual(current, element)
+}
+
+/// Waits up to `seconds` for a condition, checking every 20 ms.
+func wait(_ seconds: Double, until condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !condition() {
+        if Date() >= deadline { return false }
+        usleep(20_000)
+    }
+    return true
+}
+
+/// Makes an app frontmost, through Accessibility first and AppKit if that does not take.
+func bringToFront(_ pid: pid_t) -> Bool {
+    guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return false }
+    let application = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(application, 0.5)
+    AXUIElementSetAttributeValue(application, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    if wait(0.3, until: { isFrontmost(pid) }) { return true }
+    app.activate(options: [])
+    return wait(0.6, until: { isFrontmost(pid) })
+}
+
+/// Brings a place's app and window to the front and focuses its element. False when the
+/// element is gone, or focus cannot be put back on it.
+func bringBack(_ target: Place) -> Bool {
+    var role: CFTypeRef?
+    if AXUIElementCopyAttributeValue(target.element, kAXRoleAttribute as CFString, &role) == .invalidUIElement { return false }
+    guard bringToFront(target.pid) else { return false }
+    if let window = target.window {
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+    let focused = AXUIElementSetAttributeValue(target.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    if wait(0.4, until: { isFocused(target.element) }) { return true }
+    // Web views can report the same field under a new reference; trust a focus that was accepted.
+    return focused
+}
+
+/// Puts the cursor back where it was, if the text before it is still the same.
+func restoreCursor(_ target: Place) {
+    guard let range = target.range else { return }
+    if let now = selectedRange(target.element), now.location == range.location, now.length == range.length { return }
+    let length = (target.before as NSString).length
+    guard length > 0 || range.location == 0, text(target.element, in: CFRange(location: range.location - length, length: length)) == target.before else { return }
+    setSelectedRange(target.element, range)
+    usleep(30_000)
+}
+
+/// ⌘V into a place that has focus, then notes where the words landed for follow-ups.
+func paste(into target: Place, length: Int) -> Bool {
+    let start = selectedRange(target.element)
+    guard paste() else { return false }
+    lastInsertion = nil
+    guard let start else { return true }
+    // The app handles ⌘V on its own time; the cursor moving shows it has.
+    var end: CFRange?
+    _ = wait(0.4) {
+        guard let now = selectedRange(target.element), now.location != start.location || now.length != start.length else { return false }
+        end = now
+        return true
+    }
+    let inserted = end.map { $0.location - start.location } ?? length
+    if inserted > 0 {
+        lastInsertion = Place(pid: target.pid, element: target.element, window: target.window,
+                              range: CFRange(location: start.location, length: inserted))
+    }
+    return true
+}
+
+/// Pastes the clipboard where the dictation started. If the user has moved on, Dictait goes
+/// back there, pastes, and returns them to where they are now.
+func deliver(length: Int) -> [String: Any] {
+    guard AXIsProcessTrusted() else { return ["outcome": "untrusted"] }
+    guard let target = anchor else { return ["outcome": "no-anchor"] }
+    anchor = nil
+    return pasteBack(target, length: length)
+}
+
+func squashed(_ value: String) -> String {
+    value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+}
+
+/// Replaces Dictait's last insertion with the clipboard, only if it still reads as pasted.
+func replaceLast(expected: String, length: Int) -> [String: Any] {
+    guard AXIsProcessTrusted() else { return ["outcome": "untrusted"] }
+    guard let last = lastInsertion, let range = last.range else { return ["outcome": "gone"] }
+    var role: CFTypeRef?
+    if AXUIElementCopyAttributeValue(last.element, kAXRoleAttribute as CFString, &role) == .invalidUIElement { return ["outcome": "gone"] }
+    guard let current = text(last.element, in: range), squashed(current) == squashed(expected) else { return ["outcome": "changed"] }
+    return pasteBack(last, selecting: range, length: length)
+}
+
+/// Pastes into a place, going back to it first if focus has moved, then returning. With
+/// `selecting`, that range is replaced; otherwise the cursor goes back where it was.
+func pasteBack(_ target: Place, selecting: CFRange? = nil, length: Int) -> [String: Any] {
+    let away = focusedElement().flatMap { CFEqual($0, target.element) ? nil : place(of: $0) }
+    if away != nil, !bringBack(target) { return ["outcome": "gone"] }
+    if let selecting {
+        guard setSelectedRange(target.element, selecting) else { return ["outcome": "changed"] }
+        usleep(30_000)
+    } else {
+        restoreCursor(target)
+    }
+    guard paste(into: target, length: length) else { return ["outcome": "failed"] }
+    if let away {
+        if lastInsertion == nil { usleep(250_000) } // Let ⌘V land before focus moves on.
+        if away.pid != target.pid { _ = bringToFront(away.pid) }
+        if let window = away.window { AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
+        AXUIElementSetAttributeValue(away.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
+    return ["outcome": selecting == nil ? "pasted" : "replaced", "returned": away != nil]
 }
 
 // MARK: - Microphones
@@ -257,8 +440,11 @@ func handle(_ line: String) {
     var reply: [String: Any]
     switch request["cmd"] as? String {
     case "hotkeys": reply = ["registered": hotKeys.register(request["keys"] as? [[String: Any]] ?? [])]
-    case "focus": reply = focus()
+    case "focus": reply = focus(anchoring: request["anchor"] as? Bool ?? false)
+    case "forget": anchor = nil; reply = ["ok": true]
     case "paste": reply = ["ok": paste()]
+    case "deliver": reply = deliver(length: request["length"] as? Int ?? 0)
+    case "replace-last": reply = replaceLast(expected: request["expected"] as? String ?? "", length: request["length"] as? Int ?? 0)
     case "inputs": reply = inputs()
     case "screens": reply = ["screens": screens()]
     default: reply = ["error": "Unknown command."]

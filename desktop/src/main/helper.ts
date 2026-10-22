@@ -9,7 +9,14 @@ export interface FocusInfo {
   before: string
   selected: string
   secure?: boolean
+  /** The focused window's title, which tells a browser's Gmail from its ChatGPT. Never saved. */
+  window: string
 }
+
+/** Where pasted text went: where the dictation started, or why it could not go there. */
+export type Delivery = 'pasted' | 'gone' | 'no-anchor' | 'untrusted' | 'failed'
+/** Replacing the last insertion: done, edited since (so left alone), or no longer there. */
+export type Replacement = 'replaced' | 'changed' | 'gone' | 'untrusted' | 'failed'
 
 export interface InputDevice {
   name: string
@@ -102,14 +109,32 @@ export class NativeHelper extends EventEmitter {
     return (reply.registered as Record<string, boolean>) ?? {}
   }
 
-  async focus(): Promise<FocusInfo | null> {
-    const reply = await this.request('focus', {}, 800)
+  /** With `anchor`, the helper remembers this text field as where the coming dictation goes. */
+  async focus(anchor = false): Promise<FocusInfo | null> {
+    const reply = await this.request('focus', { anchor }, 800)
     if (!('app' in reply)) return null
     return {
       app: String(reply.app ?? ''), appName: String(reply.appName ?? ''),
       editable: typeof reply.editable === 'boolean' ? reply.editable : null,
-      before: String(reply.before ?? ''), selected: String(reply.selected ?? ''), secure: Boolean(reply.secure)
+      before: String(reply.before ?? ''), selected: String(reply.selected ?? ''), secure: Boolean(reply.secure),
+      window: String(reply.window ?? '')
     }
+  }
+
+  forget(): void {
+    void this.request('forget')
+  }
+
+  /** Pastes the clipboard where the dictation started, going back there if focus has moved. */
+  async deliver(text: string): Promise<Delivery> {
+    const outcome = (await this.request('deliver', { length: text.length }, 4000)).outcome
+    return typeof outcome === 'string' ? outcome as Delivery : 'no-anchor'
+  }
+
+  /** Swaps Dictait's last insertion, still reading `expected`, for the clipboard. */
+  async replaceLast(expected: string, text: string): Promise<Replacement> {
+    const outcome = (await this.request('replace-last', { expected, length: text.length }, 4000)).outcome
+    return typeof outcome === 'string' ? outcome as Replacement : 'gone'
   }
 
   async paste(): Promise<boolean> {

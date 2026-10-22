@@ -62,6 +62,7 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
       memoryMode: 'notes', learnCorrections: true, appearance: 'system', useContext: true, voiceEdits: true, appTones: true, microphone: 'auto',
       setupDone: !fresh, autoUpdate: true,
       tones: {
+        ai: 'Write it as a clear request to an AI assistant: the goal first, then details and constraints. Keep file names, code terms and commands exact.',
         messaging: 'Casual and brief, like a chat message. No greeting or sign-off unless I say one.',
         email: 'Clear and friendly, in complete sentences and short paragraphs. Keep greetings and sign-offs I say.',
         code: 'Literal and precise. Keep technical terms, file names, commands and identifiers exactly as said. No filler.',

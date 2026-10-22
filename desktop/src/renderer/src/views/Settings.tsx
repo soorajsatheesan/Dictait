@@ -235,9 +235,10 @@ function MicrophoneRow({ value, onChange }: { value: string; onChange: (value: s
 }
 
 const toneLabels: [keyof Tones, string, string][] = [
+  ['ai', 'AI assistants', 'ChatGPT, Codex, Claude, Claude Code, Gemini'],
   ['messaging', 'Messages & chat', 'Messages, Slack, WhatsApp, Discord, Teams'],
   ['email', 'Email', 'Mail, Outlook, Spark, Superhuman'],
-  ['code', 'Code & AI', 'VS Code, Cursor, Xcode, Terminal, ChatGPT, Claude'],
+  ['code', 'Code', 'VS Code, Cursor, Xcode, Zed, Terminal, Ghostty'],
   ['docs', 'Notes & docs', 'Notes, Notion, Obsidian, Word, Pages']
 ]
 
@@ -246,7 +247,7 @@ function ToneRow({ on, tones, onToggle, onTones }: { on: boolean; tones: Tones; 
   const [open, setOpen] = useState(false)
   return (
     <>
-      <Row icon={AppWindow} title="Match the app you’re in" detail="Casual in chat, polished in email, literal in code. Edit how each sounds.">
+      <Row icon={AppWindow} title="Match the app you’re in" detail="Clear requests for AI assistants, casual in chat, polished in email, literal in code. Edit how each sounds.">
         <button type="button" className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Done' : 'Customize'}</button>
         <Switch label="Match the app" on={on} onChange={onToggle} />
       </Row>

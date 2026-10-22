@@ -48,6 +48,10 @@ INTENT_INSTRUCTIONS = {
     "concise": "Make the provided content shorter and more concise. Keep its meaning, names and numbers.",
     "formal": "Rewrite the provided content in a more formal, professional tone. Keep its meaning, names and numbers.",
     "casual": "Rewrite the provided content in a warmer, more casual tone. Keep its meaning, names and numbers.",
+    "prompt": ("The provided content is a request the speaker is sending to an AI assistant. Turn it into a clear request in "
+               "the speaker's own words: remove fillers and false starts, start with one sentence saying what they want, then "
+               "list each separate requirement or constraint as a short '-' bullet. Keep every detail, name, file name and code "
+               "term exactly. No headings, bold or other formatting. Do not answer the request or add anything."),
 }
 COMMANDS = [
     ("summary_bullets", r"(?:understand(?: this)? and )?summari[sz]e (?:this|it|that)(?: and)? (?:make|put|turn) (?:this|it|that) (?:in(?:to)?|as) (?:bullet )?points"),
@@ -82,6 +86,103 @@ def writing_intent(text, enabled=True):
         if not found:
             break
     return mode, content
+
+
+# "Hey" marks an instruction to Dictait while dictating, like asking a note-taker: "...the token
+# isn't stored. Hey, make bullet points of that." The instruction is followed and never typed.
+# Only clear writing requests count, so "Hey Sarah, ..." and "Hey, make sure ..." stay text.
+HEY = (r"(?<![\w'])hey[,.!]?\s+(?:(?:dictait|dictate|dicta)[,.!]?\s+)?"
+       r"(?:(?:please|can you|could you|would you|will you)\s+)?")
+REFERENCE = (r"(?:this|that|it|these|those|the above|everything|all of (?:this|that|it)|all that|the whole thing|"
+             r"the (?:last|previous|whole) (?:part|bit|sentence|paragraph|point|thing|one))")
+TARGET = (r"(?:bullet(?:ed)?(?: points?| list)?|bullets|points|a list|numbered(?: list)?|steps|(?:a )?table|paragraphs?|"
+          r"headings?|short(?:er)?|brief(?:er)?|concise|quick(?:er)?|formal|professional|casual|friendl(?:y|ier)|clear(?:er)?|"
+          r"simpl(?:e|er)|polished|crisp(?:er)?|tight(?:er)?|(?:an? )?email|(?:an? )?prompt|(?:an? )?summary|tl;?dr)")
+DIRECTIVE = re.compile(
+    HEY + r"(?P<instruction>(?:"
+    r"(?:summari[sz]e|shorten|tighten|condense|simplify|polish|rephrase|reword|rewrite|clean up|tidy(?: up)?|"
+    r"bullet(?: point)?|number|translate|expand(?: on)?)\s+" + REFERENCE +
+    r"|(?:make|turn|put|format|organi[sz]e|convert|write|keep|split|break)\s+(?!sure\b)[^.!?\n]{0,40}?\b" + TARGET + r"\b"
+    r"|(?:fix|correct) (?:the )?(?:grammar|spelling|wording|punctuation|typos)"
+    r"|" + TARGET + r"(?: (?:for|of|from) " + REFERENCE + r")?(?:,? please)?(?=\s*(?:[.!?\n]|$))"
+    r")[^.!?\n]*)[.!?]*",
+    re.I)
+WHOLE = re.compile(r"\b(?:everything|all of (?:this|that|it)|all that|the whole thing)\b", re.I)
+LAST_SENTENCE = re.compile(r"\bthe (?:last|previous) (?:sentence|point|one|bit)\b", re.I)
+# What an instruction asks for, when it is one Dictait has a tuned prompt for.
+DIRECTIVE_KINDS = [
+    ("numbered", r"\bnumber|\bsteps\b"),
+    ("bullets", r"\bbullet|\bpoints\b|\blist\b"),
+    ("summary", r"\bsummar|\btl;?dr\b"),
+    ("concise", r"\bshort|\bbrief|\bconcise|\bquick|\btight|\bcondense|\bcrisp"),
+    ("formal", r"\bformal|\bprofessional"),
+    ("casual", r"\bcasual|\bfriendl|\bwarm|\brelaxed"),
+    ("paragraphs", r"\bparagraph"),
+    ("email", r"\bemail\b"),
+    ("prompt", r"\bprompt\b"),
+    ("cleanup", r"\b(?:fix|correct|clean up|tidy|polish)\b"),
+]
+
+
+SHORTER = "Make this much shorter. Keep only its essential point and its names, days and numbers."
+
+
+def split_directives(text):
+    """[content, [instructions]] pairs in spoken order. An instruction applies to what was said
+    since the one before it; at the very start, to what follows; straight after another, it
+    joins that one. Content after the last instruction is a final pair of its own."""
+    segments, leading, end = [], [], 0
+    for match in DIRECTIVE.finditer(text):
+        content = text[end:match.start()].strip(" ,;")
+        end = match.end()
+        instruction = match.group("instruction").strip(" ,;")
+        if re.search(r"\w", content):
+            if WHOLE.search(instruction) and segments:
+                content = join_parts([part for part, _ in segments] + [content])
+                leading = [i for _, done in segments for i in done] + leading
+                segments = []
+            elif LAST_SENTENCE.search(instruction):
+                sentences = re.split(r"(?<=[.!?])\s+", content)
+                if len(sentences) > 1:
+                    segments.append([" ".join(sentences[:-1]), []])
+                    content = sentences[-1]
+            segments.append([content, leading + [instruction]])
+            leading = []
+        elif segments:
+            segments[-1][1].append(instruction)
+        else:
+            leading.append(instruction)
+    rest = text[end:].strip(" ,;")
+    if re.search(r"\w", rest) or leading:
+        segments.append([rest, leading])
+    return segments
+
+
+def directive_intent(instructions):
+    """A tuned intent for the instructions, or "custom" when they need the general editor."""
+    found = set()
+    for instruction in instructions:
+        kinds = {name for name, pattern in DIRECTIVE_KINDS if re.search(pattern, instruction, re.I)}
+        if not kinds or re.search(r"\b(?:table|heading|header|translate|expand)", instruction, re.I):
+            return "custom"
+        found |= kinds - {"bullets"} if "numbered" in kinds else kinds  # "a numbered list" is not bullets.
+    found.discard("cleanup")
+    if found == {"summary", "bullets"}:
+        return "summary_bullets"
+    if len(found) > 1:
+        return "custom"
+    return found.pop() if found else "cleanup"
+
+
+def followup_instruction(text):
+    """The instruction when a whole dictation is only "hey, <change that>", meant for the text
+    Dictait just pasted. Rewrites like "hey, add a line about the deadline to that" count too."""
+    text = text.strip()
+    match = DIRECTIVE.fullmatch(text)
+    if match:
+        return match.group("instruction").strip(" ,;")
+    loose = re.fullmatch(HEY + r"(?P<instruction>(?:" + EDIT_VERBS + r")\b[^.!?\n]*\b" + REFERENCE + r"\b[^.!?\n]*)[.!?]*", text, re.I)
+    return loose.group("instruction").strip(" ,;") if loose else None
 
 
 def clear_self_corrections(text):
@@ -215,7 +316,7 @@ def apply_voice_commands(text):
 
 def looks_like_instruction(text):
     """True when a dictation over a selection is a request to rewrite it, not replacement text."""
-    return bool(re.match(r"^\s*(?:please\s+|can you\s+|could you\s+|would you\s+)?(?:" + EDIT_VERBS + r")\b", text, re.I))
+    return bool(re.match(r"^\s*(?:hey[,.!]?\s+)?(?:please\s+|can you\s+|could you\s+|would you\s+)?(?:" + EDIT_VERBS + r")\b", text, re.I))
 
 
 def fit_to_context(text, before, vocabulary=()):
@@ -366,7 +467,7 @@ def valid_edit(raw, edited, intent="cleanup"):
     if re.search(r"(?i)^(here(?:'s| is)|corrected (?:text|version)|i cannot|i can't)", edited):
         return False
     # Tidying and list-making must not quietly drop sentences or items.
-    needed = {"cleanup": 0.7, "bullets": 0.7, "numbered": 0.7, "paragraphs": 0.7, "email": 0.55}.get(intent)
+    needed = {"cleanup": 0.7, "bullets": 0.7, "numbered": 0.7, "paragraphs": 0.7, "email": 0.55, "prompt": 0.45}.get(intent)
     if needed and coverage(raw, edited) < needed:
         return False
     # Ignore list numbering and repeated numeric mentions, but protect factual numbers.
@@ -448,6 +549,8 @@ class Engine:
         self.smart_formatting = True
         self.writing_style = "Keep my natural tone and wording."
         self.context = ""
+        # The kind of app the text goes into; "ai" turns longer dictations into clear requests.
+        self.app_kind = ""
         self.memory_enabled = memory
         self.memory = None
         self.memory_error = None
@@ -519,6 +622,12 @@ class Engine:
                 {"role": "user", "content": "I I need to meet Maya on Monday, no, Tuesday. Um, keep it quick."},
                 {"role": "assistant", "content": "I need to meet Maya on Tuesday. Keep it quick."},
             ])
+        elif intent == "prompt":
+            messages.extend([
+                {"role": "user", "content": "So um I want you to fix the login page, like when you refresh it logs you out, and "
+                                            "make sure you don't change the API, and also add a test for it."},
+                {"role": "assistant", "content": "Fix the login page so refreshing it no longer logs you out.\n- Don't change the API.\n- Add a test for it."},
+            ])
         elif intent in {"bullets", "summary_bullets"}:
             messages.extend([
                 {"role": "user", "content": "We need a local Mac app with linked notes. We want it to start at login. It should start automatically at login."},
@@ -556,13 +665,20 @@ class Engine:
         mel = get_logmel(mx.array(audio, dtype=mx.float32), self.stt.preprocessor_config)
         return self.stt.generate(mel.astype(mx.bfloat16))[0].text
 
-    def clean(self, text, budget=2.5, smart=None):
+    def clean(self, text, budget=2.5, smart=None, intent=None):
+        """Tidy a dictation, following a spoken writing command at its start or end. A given
+        `intent` (from a "hey" instruction) is applied to the whole text instead."""
         if self.llm is None:
             return text, self.cleanup_error or "Grammar cleanup is off."
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
 
-        intent, content = writing_intent(text, self.smart_formatting if smart is None else smart)
+        if intent is None:
+            intent, content = writing_intent(text, self.smart_formatting if smart is None else smart)
+            if intent == "cleanup" and self.app_kind == "ai" and len(content.split()) >= 30:
+                intent = "prompt"
+        else:
+            content = text
         content = clear_self_corrections(content)
         if not content:
             return text, "Say the content together with your writing instruction."
@@ -628,6 +744,45 @@ class Engine:
         if not edited or "<think>" in edited or (last is not None and last.finish_reason == "length"):
             return "", "The rewrite was incomplete."
         return edited, None
+
+    def follow(self, segments, cleanup=True):
+        """A dictation with "hey" instructions: each stretch is tidied and the instructions for
+        it followed. Returns the text, a warning, and how many stretches were followed."""
+        parts, warnings, followed = [], [], 0
+        for index, (content, instructions) in enumerate(segments):
+            if not content:
+                continue
+            if index:
+                self.context = ""  # Only the first stretch continues the document's text.
+            intent = directive_intent(instructions) if instructions else "cleanup"
+            budget = min(20.0, max(4.0 if instructions else 2.5, len(content.split()) / 25))
+            if not cleanup or self.llm is None:
+                # No model: still never type the instruction, and still make a requested list.
+                text, warning = content, None
+                if intent in {"bullets", "numbered"}:
+                    marker = (lambda n: f"{n}. ") if intent == "numbered" else (lambda n: "- ")
+                    text = "\n".join(marker(n) + item for n, item in enumerate(list_items(content), 1)) or content
+                elif instructions:
+                    warning = self.cleanup_error or "Instructions other than lists need grammar cleanup turned on."
+            elif intent in {"custom", "concise"}:
+                # The general editor shortens far better than cleanup when told plainly what shorter means.
+                instruction = SHORTER if intent == "concise" else "; then ".join(instructions)
+                text, warning = self.clean(content, budget=budget, intent="cleanup")
+                edited, problem = self.edit(text, instruction)
+                text, warning = (edited, warning) if edited else (text, problem)
+            else:
+                text, warning = self.clean(content, budget=budget, intent=intent)
+            followed += bool(instructions) and warning is None
+            parts.append(text.strip())
+            if warning:
+                warnings.append(warning)
+        # Lists and other multi-line results stand as their own paragraphs.
+        block = lambda part: "\n" in part or bool(re.match(r"(?:[-*•]|\d+[.)])\s", part))
+        text, last = "", ""
+        for part in filter(None, parts):
+            text += ("\n\n" if block(part) or block(last) else " ") + part if text else part
+            last = part
+        return text, "; ".join(dict.fromkeys(warnings)) or None, followed
 
     def clean_long(self, raw, cleaned, last):
         """Finish a long dictation whose earlier parts were cleaned while the user kept talking."""
@@ -695,6 +850,7 @@ def configure(engine, request):
     engine.smart_formatting = bool(request.get("smart_formatting", True))
     engine.writing_style = str(request.get("writing_style", "Keep my natural tone and wording."))[:600]
     engine.context = str(request.get("context", ""))[-500:]
+    engine.app_kind = str(request.get("app_kind", ""))
     examples = request.get("examples", [])
     engine.examples = [{"original": str(e.get("original", ""))[:240],
                         "corrected": str(e.get("corrected", ""))[:240]}
@@ -773,11 +929,31 @@ def serve(engine, source, output):
                      total_ms=round((time.perf_counter() - start) * 1000), warning=warning,
                      language=getattr(engine, "detected_language", None))
                 continue
+            smart = getattr(engine, "smart_formatting", True)
+            followup = followup_instruction(raw) if raw and smart else None
+            if followup:
+                # "Hey, make that shorter": the instruction is for the dictation just pasted.
+                earlier = str(request.get("previous_output", ""))
+                text, warning = engine.edit(earlier.strip(), followup) if earlier.strip() else ("", None)
+                if text:
+                    text = earlier[:len(earlier) - len(earlier.lstrip())] + text  # Keep the joining space.
+                emit(output, "result", id=request_id, text=text, raw=raw, mode="followup", stt_ms=stt_ms,
+                     total_ms=round((time.perf_counter() - start) * 1000), warning=warning,
+                     language=getattr(engine, "detected_language", None))
+                continue
+            segments = split_directives(raw) if raw and smart else []
+            directed = any(instructions for _, instructions in segments)
             if raw and memory and memory_mode != "off":
                 engine.vocabulary = personal_words + memory.vocabulary(limit=60, query=raw)
-            text, warning = raw, None
+            text, warning, followed = raw, None, 0
             before = engine.context
-            if raw and request.get("cleanup", True):
+            if directed:
+                try:
+                    text, warning, followed = engine.follow(segments, request.get("cleanup", True))
+                except Exception as exc:
+                    text = join_parts(content for content, _ in segments)
+                    warning = f"Could not follow your instruction: {exc}"
+            elif raw and request.get("cleanup", True):
                 try:
                     if session and session["groups"]:
                         rest = apply_voice_commands(" ".join(part for part in pieces[session["consumed"]:] if part))
@@ -797,7 +973,7 @@ def serve(engine, source, output):
                     memory.write_note(note_id, refresh_graph=False)
                 except Exception as exc:
                     warning = f"Text is ready, but saving the linked note failed: {exc}"
-            emit(output, "result", id=request_id, text=text, raw=raw,
+            emit(output, "result", id=request_id, text=text, raw=raw, instructions=followed,
                  stt_ms=stt_ms, total_ms=round((time.perf_counter() - start) * 1000),
                  warning=warning, language=getattr(engine, "detected_language", None))
             if raw and memory and memory_mode != "off":

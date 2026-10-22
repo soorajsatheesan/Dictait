@@ -162,7 +162,7 @@ function sanitize(patch: Partial<Settings>): Partial<Settings> {
   pick('microphone', (value) => typeof value === 'string' && value.length <= 200)
   if (patch.tones && typeof patch.tones === 'object') {
     const tones: Partial<Tones> = {}
-    for (const key of ['messaging', 'email', 'code', 'docs'] as const) {
+    for (const key of ['ai', 'messaging', 'email', 'code', 'docs'] as const) {
       const value = (patch.tones as Partial<Tones>)[key]
       if (typeof value === 'string') tones[key] = value.slice(0, 300)
     }

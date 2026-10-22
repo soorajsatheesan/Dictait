@@ -75,8 +75,10 @@ Dictait checks GitHub for new releases now and then (**Settings → Updates**; y
 - **Dictate anywhere.** Tap ⌃ Space to start and again to finish, or hold it while you talk and let go. The island drops from the notch, shows your voice and your words as you speak, then pastes clean, punctuated text at the cursor. If no text box has focus, the text is copied instead.
 - **Talk the way you talk.** “Scratch that” removes the sentence you just said. “New line” and “new paragraph” break the text. Self-corrections like “at five, no, at six” keep only what you meant.
 - **Say what you want.** End or start a dictation with “as bullet points”, “number these”, “summarize this”, “format this as an email”, “make this shorter” or “more formal”.
+- **Say “hey” to your note-taker.** Mid-dictation, “hey, make bullet points of that”, “hey, keep it quick” or “hey, put this in a table” applies to what you just said, and the instruction itself is never typed. Right after a paste, “hey, make that shorter” rewrites it in place, unless you’ve edited it since.
 - **Edit by voice.** Select text in any app, press ⌃ Space and say what to change. Dictait rewrites the selection in place.
-- **Fits where you’re typing.** Reads the sentence before your cursor (never saved, never in password fields) so names and flow match, and adapts tone: casual in chat, polished in email, literal in code.
+- **Lands where you started.** Click somewhere else while Dictait is still working and the text still goes to the box and cursor you started in; then you’re put back where you were.
+- **Fits where you’re typing.** Reads the sentence before your cursor (never saved, never in password fields) so names and flow match, and adapts to the app: a clear request in ChatGPT, Codex, Claude or Claude Code, casual in chat, polished in email, literal in code. In a browser, the tab decides.
 - **Learns your words.** Add names and terms in Vocabulary, or correct one once and Dictait offers to remember it.
 - **Long dictations.** Up to 30 minutes. Dictait transcribes in pieces at your natural pauses while you keep talking, so stopping only waits for the last few seconds.
 - **Paste it again.** ⌃ ⌥ V pastes your last dictation; the menu bar keeps the last ten.

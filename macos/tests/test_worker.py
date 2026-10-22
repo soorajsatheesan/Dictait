@@ -302,5 +302,124 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
 
 
+
+class NoteTaker:
+    """Says one fixed transcript and records what it was asked to clean and rewrite."""
+    smart_formatting = True
+    follow = worker.Engine.follow
+
+    def __init__(self, said, llm=True):
+        self.said = said
+        self.llm = object() if llm else None
+        self.cleanup_error = None
+        self.context = ""
+        self.cleaned, self.edits = [], []
+
+    def transcribe(self, audio, language, previous=""):
+        return self.said
+
+    def clean(self, text, budget=2.5, smart=None, intent=None):
+        self.cleaned.append((text, intent))
+        return f"[{intent or 'cleanup'}] {text}", None
+
+    def edit(self, selection, instruction):
+        self.edits.append((selection, instruction))
+        return selection.upper(), None
+
+
+class HeyInstructionTests(unittest.TestCase):
+    def run_request(self, engine, **kwargs):
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            request = {"command": "transcribe", "id": "hey", "path": str(make_wav(directory)), **kwargs}
+            worker.serve(engine, [json.dumps(request)], output)
+            return json.loads(output.getvalue().splitlines()[-1])
+
+    def test_instruction_applies_to_what_was_said_before_it(self):
+        segments = worker.split_directives("The login breaks on refresh. The token isn't stored. Hey, make bullet points of that. "
+                                           "Also the settings page is slow.")
+        self.assertEqual(segments, [["The login breaks on refresh. The token isn't stored.", ["make bullet points of that"]],
+                                    ["Also the settings page is slow.", []]])
+
+    def test_instruction_at_the_start_applies_to_what_follows(self):
+        self.assertEqual(worker.split_directives("Hey, make this a numbered list. Buy milk. Call mom."),
+                         [["Buy milk. Call mom.", ["make this a numbered list"]]])
+
+    def test_ordinary_hey_stays_text(self):
+        for said in ["Hey Sarah, can you send me the deck?", "Hey, make sure you bring the docs.", "Hey there, how are you?",
+                     "Hey, fix it tomorrow please.", "Hey, put it on the list. Thanks!", "They make it short."]:
+            self.assertEqual(worker.split_directives(said), [[said, []]], said)
+
+    def test_scopes_reach_back_to_the_last_sentence_or_everything(self):
+        self.assertEqual(worker.split_directives("First thing. Second thing. Hey, put the last sentence in a table."),
+                         [["First thing.", []], ["Second thing.", ["put the last sentence in a table"]]])
+        self.assertEqual(worker.split_directives("One. Hey, bullet that. Two. Hey, summarize everything."),
+                         [["One.\n\nTwo.", ["bullet that", "summarize everything"]]])
+
+    def test_instructions_map_to_tuned_intents(self):
+        self.assertEqual(worker.directive_intent(["keep it quick"]), "concise")
+        self.assertEqual(worker.directive_intent(["make this a numbered list"]), "numbered")
+        self.assertEqual(worker.directive_intent(["summarize that and make it bullet points"]), "summary_bullets")
+        self.assertEqual(worker.directive_intent(["turn this into a prompt for Codex"]), "prompt")
+        self.assertEqual(worker.directive_intent(["put this in a table"]), "custom")
+        self.assertEqual(worker.directive_intent(["make it shorter and more formal"]), "custom")
+
+    def test_instruction_is_followed_and_never_typed(self):
+        engine = NoteTaker("I need to meet Maya on Tuesday. Hey, keep it quick. Also bring the deck.")
+        event = self.run_request(engine)
+        self.assertEqual(engine.cleaned, [("I need to meet Maya on Tuesday.", "cleanup"), ("Also bring the deck.", "cleanup")])
+        self.assertEqual(engine.edits, [("[cleanup] I need to meet Maya on Tuesday.", worker.SHORTER)])
+        self.assertEqual(event["text"], "[CLEANUP] I NEED TO MEET MAYA ON TUESDAY. [cleanup] Also bring the deck.")
+        self.assertEqual(event["instructions"], 1)
+        self.assertNotIn("hey", event["text"].lower())
+
+    def test_tuned_instruction_uses_its_cleanup_prompt(self):
+        engine = NoteTaker("Open the app. Click record. Hey, number these.")
+        self.assertEqual(self.run_request(engine)["text"], "[numbered] Open the app. Click record.")
+        self.assertEqual(engine.edits, [])
+
+    def test_unusual_instruction_goes_to_the_editor(self):
+        engine = NoteTaker("Rent is 900, food is 300. Hey, put this in a table.")
+        event = self.run_request(engine)
+        self.assertEqual(engine.edits, [("[cleanup] Rent is 900, food is 300.", "put this in a table")])
+        self.assertEqual(event["text"], "[CLEANUP] RENT IS 900, FOOD IS 300.")
+
+    def test_without_cleanup_instructions_are_still_not_typed(self):
+        engine = NoteTaker("Buy milk. Call mom. Hey, bullet points.", llm=False)
+        event = self.run_request(engine, cleanup=False)
+        self.assertEqual(event["text"], "- Buy milk.\n- Call mom.")
+
+    def test_lists_start_their_own_paragraph(self):
+        engine = NoteTaker("We ship Friday. Hey, bullet that. Then we rest.")
+        engine.clean = lambda text, budget=2.5, smart=None, intent=None: ("- " + text if intent == "bullets" else text, None)
+        self.assertEqual(self.run_request(engine)["text"], "- We ship Friday.\n\nThen we rest.")
+
+    def test_follow_up_rewrites_the_last_paste(self):
+        engine = NoteTaker("Hey, make that shorter.")
+        event = self.run_request(engine, previous_output=" we will meet maya on tuesday at the office")
+        self.assertEqual(event["mode"], "followup")
+        self.assertEqual(engine.edits, [("we will meet maya on tuesday at the office", "make that shorter")])
+        self.assertEqual(event["text"], " WE WILL MEET MAYA ON TUESDAY AT THE OFFICE")
+
+    def test_follow_up_with_nothing_recent_types_nothing(self):
+        event = self.run_request(NoteTaker("Hey, make that shorter."))
+        self.assertEqual((event["mode"], event["text"]), ("followup", ""))
+
+    def test_follow_ups_need_a_clear_reference(self):
+        self.assertEqual(worker.followup_instruction("Hey, add a line about the deadline to that."), "add a line about the deadline to that")
+        self.assertEqual(worker.followup_instruction("Hey Dictait, turn it into bullets."), "turn it into bullets")
+        self.assertIsNone(worker.followup_instruction("Hey, add me to the channel."))
+        self.assertIsNone(worker.followup_instruction("Hey, can you send that file?"))
+
+    def test_smart_formatting_off_types_hey_as_said(self):
+        engine = NoteTaker("Hey, make that shorter.")
+        engine.smart_formatting = False
+        event = self.run_request(engine, smart_formatting=False, previous_output="text")
+        self.assertNotIn("mode", event)
+        self.assertEqual(engine.cleaned, [("Hey, make that shorter.", None)])
+
+    def test_hey_before_an_instruction_over_a_selection_still_edits(self):
+        self.assertTrue(worker.looks_like_instruction("Hey, make this shorter."))
+
 if __name__ == "__main__":
     unittest.main()
