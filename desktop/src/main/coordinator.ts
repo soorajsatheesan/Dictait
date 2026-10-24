@@ -120,6 +120,7 @@ export class Coordinator extends EventEmitter {
 
   start(): void {
     this.helper.on('hotkey', (name: string, down: boolean) => this.hotkey(name, down))
+    this.helper.on('delivered', (text: string, pasted: boolean) => this.deliveredLater(text, pasted))
     this.helper.start()
     void this.registerShortcut()
     this.refreshPermissions()
@@ -501,9 +502,10 @@ export class Coordinator extends EventEmitter {
           }
           const done = edit ? 'Replaced.' : followed ? `Pasted, following your instruction${followed > 1 ? 's' : ''}.` : 'Pasted.'
           this.setPhase('ready', outcome === 'pasted' ? `${done} Control–Space to dictate again.`
-            : outcome === 'no-target' ? 'Copied. No text box was in focus, so press Command–V where you want it.'
-              : outcome === 'gone' ? 'Copied. The text box you started in is gone, so press Command–V where you want it.'
-                : 'Copied. Press Command–V to paste.')
+            : outcome === 'waiting' ? 'Copied. You moved away from where you started, so it will be pasted there when you go back.'
+              : outcome === 'no-target' ? 'Copied. No text box was in focus, so press Command–V where you want it.'
+                : outcome === 'gone' ? 'Copied. The text box you started in is gone, so press Command–V where you want it.'
+                  : 'Copied. Press Command–V to paste.')
           this.emit('archive')
         })
         break
@@ -554,7 +556,7 @@ export class Coordinator extends EventEmitter {
    * Dictait goes back to that text field, pastes, and returns them. Without a remembered field
    * (none had focus at the start), it pastes wherever the cursor is now.
    */
-  private async deliverBack(text: string): Promise<'pasted' | 'copied' | 'no-target' | 'gone'> {
+  private async deliverBack(text: string): Promise<'pasted' | 'copied' | 'no-target' | 'gone' | 'waiting'> {
     this.lastPasted = null
     await this.copyText(text)
     if (!this.stored.autoPaste) return 'copied'
@@ -564,7 +566,14 @@ export class Coordinator extends EventEmitter {
     const outcome = await this.helper.deliver(text)
     if (outcome === 'no-anchor') return this.deliver(text)
     if (outcome === 'pasted') this.lastPasted = { text, at: Date.now() }
-    return outcome === 'pasted' || outcome === 'gone' ? outcome : 'copied'
+    return outcome === 'pasted' || outcome === 'gone' || outcome === 'waiting' || outcome === 'no-target' ? outcome : 'copied'
+  }
+
+  /** A dictation that waited for the user to go back to where it started has been pasted. */
+  private deliveredLater(text: string, pasted: boolean): void {
+    if (!pasted) return
+    this.lastPasted = { text, at: Date.now() }
+    if (this.state.phase === 'ready') this.setPhase('ready', 'Pasted where you started. Control–Space to dictate again.')
   }
 
   /** "Hey, make that shorter": the last dictation, rewritten in place if it is untouched. */

@@ -75,6 +75,10 @@ func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
     return (value as! AXUIElement)
 }
 
+func string(_ element: AXUIElement, _ name: String) -> String {
+    attribute(element, name) as? String ?? ""
+}
+
 func focusedElement() -> AXUIElement? {
     let system = AXUIElementCreateSystemWide()
     AXUIElementSetMessagingTimeout(system, 0.3)
@@ -102,8 +106,14 @@ func setSelectedRange(_ element: AXUIElement, _ range: CFRange) -> Bool {
     return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success
 }
 
-/// The element's text in a range; some editors only expose their whole value, which is sliced
-/// when it is a reasonable size.
+/// The element's whole text, when it is a reasonable size.
+func wholeText(_ element: AXUIElement) -> NSString? {
+    guard let whole = attribute(element, kAXValueAttribute) as? String else { return nil }
+    let all = whole as NSString
+    return all.length < 500_000 ? all : nil
+}
+
+/// The element's text in a range; some editors only expose their whole value, which is sliced.
 func text(_ element: AXUIElement, in range: CFRange) -> String? {
     guard range.location >= 0, range.length >= 0 else { return nil }
     if range.length == 0 { return "" }
@@ -115,22 +125,88 @@ func text(_ element: AXUIElement, in range: CFRange) -> String? {
             return value
         }
     }
-    guard let whole = attribute(element, kAXValueAttribute) as? String else { return nil }
-    let all = whole as NSString
-    guard all.length < 500_000, range.location + range.length <= all.length else { return nil }
+    guard let all = wholeText(element), range.location + range.length <= all.length else { return nil }
     return all.substring(with: NSRange(location: range.location, length: range.length))
+}
+
+func characterCount(_ element: AXUIElement) -> Int? {
+    if let count = attribute(element, kAXNumberOfCharactersAttribute) as? Int { return count }
+    return wholeText(element)?.length
+}
+
+/// The address of the web page holding an element, which tells one conversation, channel or
+/// tab from another when an app reuses the same text box for all of them.
+func page(of element: AXUIElement) -> String? {
+    var current: AXUIElement? = element
+    for _ in 0..<60 {
+        guard let node = current else { return nil }
+        if string(node, kAXRoleAttribute) == "AXWebArea" {
+            return (attribute(node, kAXURLAttribute) as? URL)?.absoluteString ?? ""
+        }
+        current = elementAttribute(node, kAXParentAttribute)
+    }
+    return nil
+}
+
+/// The address of the page a window shows (a browser's tab, a web app's conversation), for
+/// apps that keep their text boxes to themselves.
+func windowPage(_ window: AXUIElement) -> String? {
+    var queue = [window], seen = 0
+    while !queue.isEmpty, seen < 300 {
+        let node = queue.removeFirst()
+        seen += 1
+        let role = string(node, kAXRoleAttribute)
+        if role == "AXWebArea" || role == "AXGroup", let url = attribute(node, kAXURLAttribute) as? URL { return url.absoluteString }
+        queue += attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    }
+    return nil
+}
+
+/// What a text box calls itself, to recognise it when a web app rebuilds it.
+func label(of element: AXUIElement) -> String {
+    [kAXDescriptionAttribute, kAXPlaceholderValueAttribute as String, kAXTitleAttribute, "AXDOMIdentifier"]
+        .map { string(element, $0) }.joined(separator: "|")
+}
+
+let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+let controlRoles: Set<String> = [
+    "AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXSlider", "AXIncrementor",
+    "AXList", "AXOutline", "AXTable", "AXBrowser", "AXRow", "AXCell", "AXImage", "AXScrollArea", "AXSplitGroup",
+    "AXTabGroup", "AXToolbar", "AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem", "AXDockItem", "AXColorWell",
+    "AXDisclosureTriangle", "AXLink", "AXStaticText", "AXLevelIndicator", "AXValueIndicator"
+]
+
+/// True for text fields, false for buttons, lists and other controls, nil when unsure.
+func editable(_ element: AXUIElement) -> Bool? {
+    let role = string(element, kAXRoleAttribute)
+    if textRoles.contains(role) { return true }
+    var names: CFArray?
+    if AXUIElementCopyAttributeNames(element, &names) == .success, (names as? [String] ?? []).contains("AXEditableAncestor") { return true }
+    return controlRoles.contains(role) ? false : nil
 }
 
 /// Where a dictation started: its text goes back here even if the user clicks somewhere else
 /// while it is being transcribed.
 struct Place {
     let pid: pid_t
-    /// The text field, when the app describes it; some only reveal their app and window.
-    let element: AXUIElement?
+    /// The text field, or nil when there was none and only the app and window are known.
+    var element: AXUIElement?
     let window: AXUIElement?
     var range: CFRange?
-    /// Text just before the range, to tell whether the cursor's spot still means the same place.
+    /// Text around the cursor, to find the spot again and to notice a different document.
     var before = ""
+    var selected = ""
+    var after = ""
+    var page: String?
+    var role = ""
+    var label = ""
+    /// Started on a button or list rather than anywhere text could go.
+    var control = false
+}
+
+/// A place known only by its app, window and page.
+func windowPlace(_ pid: pid_t, _ window: AXUIElement?, control: Bool = false) -> Place {
+    Place(pid: pid, element: nil, window: window, page: window.flatMap(windowPage), control: control)
 }
 
 var anchor: Place?
@@ -143,26 +219,35 @@ func focusedWindow(_ pid: pid_t) -> AXUIElement? {
     return elementAttribute(application, kAXFocusedWindowAttribute)
 }
 
-func place(of element: AXUIElement) -> Place? {
+func windowOf(_ element: AXUIElement, _ pid: pid_t) -> AXUIElement? {
+    elementAttribute(element, kAXWindowAttribute) ?? focusedWindow(pid)
+}
+
+func place(of element: AXUIElement, reading: Bool = true) -> Place? {
     var pid: pid_t = 0
     guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
-    let window = elementAttribute(element, kAXWindowAttribute) ?? focusedWindow(pid)
-    return Place(pid: pid, element: element, window: window, range: selectedRange(element))
+    var found = Place(pid: pid, element: element, window: windowOf(element, pid), range: selectedRange(element))
+    guard reading else { return found }
+    found.page = page(of: element)
+    found.role = string(element, kAXRoleAttribute)
+    found.label = label(of: element)
+    if let range = found.range {
+        let start = max(0, range.location - 600)
+        found.before = text(element, in: CFRange(location: start, length: range.location - start)) ?? ""
+        found.selected = text(element, in: range) ?? ""
+        let end = range.location + range.length
+        if let count = characterCount(element), count > end {
+            found.after = text(element, in: CFRange(location: end, length: min(200, count - end))) ?? ""
+        }
+    }
+    return found
 }
 
-/// Where the user is now: the focused text field, or at least the front app and its window.
+/// Where the user is now: the focused element, or at least the front app and its window.
 func currentPlace() -> Place? {
-    if let element = focusedElement(), let found = place(of: element) { return found }
+    if let element = focusedElement(), let found = place(of: element, reading: false) { return found }
     guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
     return Place(pid: front.processIdentifier, element: nil, window: focusedWindow(front.processIdentifier))
-}
-
-/// Whether two places are the same field, or failing that the same window of the same app.
-func same(_ one: Place, _ other: Place) -> Bool {
-    guard one.pid == other.pid else { return false }
-    if let a = one.element, let b = other.element { return CFEqual(a, b) }
-    if let a = one.window, let b = other.window { return CFEqual(a, b) }
-    return true
 }
 
 /// Electron apps (Codex, Slack, T3 Code…) describe their text fields only to assistive apps
@@ -192,56 +277,38 @@ func focus(anchoring: Bool = false) -> [String: Any] {
         exposeTextFields(front.processIdentifier)
         _ = wait(0.4) { focused = focusedElement(); return focused != nil }
     }
-    guard let element = focused else {
-        // Still no field: remember the app and window, so the words at least go back there.
-        if anchoring, let front { anchor = Place(pid: front.processIdentifier, element: nil, window: focusedWindow(front.processIdentifier)) }
+    guard let element = focused, var found = place(of: element) else {
+        // No field: remember the app and window, so the words go nowhere else.
+        if anchoring, let front { anchor = windowPlace(front.processIdentifier, focusedWindow(front.processIdentifier)) }
         if let front, let window = focusedWindow(front.processIdentifier) {
-            result["window"] = String((attribute(window, kAXTitleAttribute) as? String ?? "").prefix(200))
+            result["window"] = String(string(window, kAXTitleAttribute).prefix(200))
         }
         return result
     }
-    func string(_ name: String) -> String { attribute(element, name) as? String ?? "" }
-    let role = string(kAXRoleAttribute), subrole = string(kAXSubroleAttribute)
-    result["role"] = role
-    var found = place(of: element)
+    result["role"] = found.role
     // The window title tells a browser's Gmail from its ChatGPT; it is never saved.
-    if let window = found?.window { result["window"] = String((attribute(window, kAXTitleAttribute) as? String ?? "").prefix(200)) }
-    let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
-    let controls: Set<String> = [
-        "AXButton", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXSlider", "AXIncrementor",
-        "AXList", "AXOutline", "AXTable", "AXBrowser", "AXRow", "AXCell", "AXImage", "AXScrollArea", "AXSplitGroup",
-        "AXTabGroup", "AXToolbar", "AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem", "AXDockItem", "AXColorWell",
-        "AXDisclosureTriangle", "AXLink", "AXStaticText", "AXLevelIndicator", "AXValueIndicator"
-    ]
-    var names: CFArray?
-    let attributes = AXUIElementCopyAttributeNames(element, &names) == .success ? (names as? [String] ?? []) : []
-    if textRoles.contains(role) || attributes.contains("AXEditableAncestor") {
-        result["editable"] = true
-    } else if controls.contains(role) {
-        result["editable"] = false
-        return result
-    } else {
-        // Not a known text field (often a whole web page): putting focus back on it could pull
-        // the cursor out of the page's own field, so remember only the app and window.
-        if anchoring, let found { anchor = Place(pid: found.pid, element: nil, window: found.window) }
+    if let window = found.window { result["window"] = String(string(window, kAXTitleAttribute).prefix(200)) }
+    let kind = editable(element)
+    if kind != true || found.role == "AXWebArea" {
+        // A button, a list, or a whole web page: no text cursor to come back to.
+        if let kind { result["editable"] = kind }
+        if anchoring { anchor = windowPlace(found.pid, found.window, control: kind == false) }
         return result
     }
-    if subrole == "AXSecureTextField" {
+    result["editable"] = true
+    if string(element, kAXSubroleAttribute) == "AXSecureTextField" {
         result["secure"] = true
+        found.before = ""; found.selected = ""; found.after = ""
         if anchoring { anchor = found }
         return result
     }
-    result["selected"] = String(string(kAXSelectedTextAttribute).prefix(8000))
-    if let selection = found?.range {
-        let start = max(0, selection.location - 600)
-        result["before"] = text(element, in: CFRange(location: start, length: selection.location - start)) ?? ""
-    }
-    found?.before = result["before"] as? String ?? ""
+    result["selected"] = String(string(element, kAXSelectedTextAttribute).prefix(8000))
+    result["before"] = found.before
     if anchoring { anchor = found }
     return result
 }
 
-// MARK: - Delivery to where the dictation started
+// MARK: - Finding the place again
 
 func isFrontmost(_ pid: pid_t) -> Bool {
     let app = AXUIElementCreateApplication(pid)
@@ -255,11 +322,6 @@ func isGone(_ element: AXUIElement?) -> Bool {
     return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .invalidUIElement
 }
 
-func isFocused(_ element: AXUIElement) -> Bool {
-    guard let current = focusedElement() else { return false }
-    return CFEqual(current, element)
-}
-
 /// Waits up to `seconds` for a condition, checking every 20 ms.
 func wait(_ seconds: Double, until condition: () -> Bool) -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
@@ -270,9 +332,113 @@ func wait(_ seconds: Double, until condition: () -> Bool) -> Bool {
     return true
 }
 
+/// Whether an element is the place's text box: the same one, or one a web app rebuilt in its
+/// place, on the same page.
+func matches(_ element: AXUIElement, _ target: Place) -> Bool {
+    guard let field = target.element else { return false }
+    if CFEqual(element, field) { return target.page == nil || page(of: element) == target.page }
+    guard target.page != nil, !target.label.isEmpty, string(element, kAXRoleAttribute) == target.role,
+          label(of: element) == target.label else { return false }
+    return page(of: element) == target.page
+}
+
+enum Spot {
+    /// Still the same text; paste at this range (nil: wherever its cursor is).
+    case same(CFRange?)
+    /// The box now holds another document or conversation.
+    case different
+}
+
+/// Finds where the cursor was by the text around it, which also shows whether an app that
+/// reuses one text view (Notes, chat apps) now shows something else in it.
+func spot(of target: Place, in element: AXUIElement) -> Spot {
+    guard let range = target.range else { return .same(nil) }
+    let before = String(target.before.suffix(200)), after = target.after, selected = target.selected
+    let length = (selected as NSString).length
+    if before.isEmpty && after.isEmpty { return .same(range) }
+    let lead = (before as NSString).length
+    if !before.isEmpty, text(element, in: CFRange(location: range.location - lead, length: lead)) == before,
+       length == 0 || text(element, in: CFRange(location: range.location, length: length)) == selected {
+        return .same(range)
+    }
+    guard let all = wholeText(element) else {
+        // Unreadable text: trust the box, and paste at its own cursor.
+        return text(element, in: CFRange(location: 0, length: 1)) == nil ? .same(nil) : .different
+    }
+    // Text was added or removed earlier on: look for the words around the cursor, nearest first.
+    var spots: [Int] = []
+    for (pattern, offset) in [(before + selected, lead), (selected + after, 0)] where pattern != selected {
+        var search = NSRange(location: 0, length: all.length)
+        while true {
+            let found = all.range(of: pattern, options: [], range: search)
+            if found.location == NSNotFound { break }
+            spots.append(found.location + offset)
+            search = NSRange(location: found.location + 1, length: all.length - found.location - 1)
+        }
+    }
+    guard let best = spots.min(by: { abs($0 - range.location) < abs($1 - range.location) }) else { return .different }
+    return .same(CFRange(location: best, length: length))
+}
+
+/// Whether the user is at the place right now, and where in it to paste.
+func here(_ target: Place) -> (element: AXUIElement?, range: CFRange?)? {
+    let element = focusedElement()
+    var pid: pid_t = 0
+    if let element { AXUIElementGetPid(element, &pid) } else { pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0 }
+    guard pid == target.pid else { return nil }
+    guard target.element != nil else {
+        // Only the window was known: any spot in it will do, while it shows the same page.
+        let window = element.flatMap { windowOf($0, target.pid) } ?? focusedWindow(target.pid)
+        if let window, let wanted = target.window, !CFEqual(window, wanted) { return nil }
+        if let page = target.page, window.flatMap(windowPage) != page { return nil }
+        return (element, nil)
+    }
+    guard let element, matches(element, target), case .same(let range) = spot(of: target, in: element) else { return nil }
+    return (element, range)
+}
+
+/// Whether the place's window could come back: not closed, minimised or in a hidden app.
+/// (Windows on another Space go unlisted, so being brought back is what really proves it.)
+func showing(_ target: Place) -> Bool {
+    guard let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated, !app.isHidden else { return false }
+    guard let window = target.window else { return true }
+    return !isGone(window) && (attribute(window, kAXMinimizedAttribute) as? Bool) != true
+}
+
+/// The place's text box as it is now: the same one, or a rebuilt one on the same page.
+func locate(_ target: Place) -> AXUIElement? {
+    guard let field = target.element else { return nil }
+    if !isGone(field) { return matches(field, target) ? field : nil }
+    guard target.page != nil, !target.label.isEmpty, let window = target.window, !isGone(window) else { return nil }
+    var queue = [window], seen = 0
+    while !queue.isEmpty, seen < 2500 {
+        let node = queue.removeFirst()
+        seen += 1
+        if string(node, kAXRoleAttribute) == target.role, matches(node, target) { return node }
+        queue += attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    }
+    return nil
+}
+
+// MARK: - Delivery to where the dictation started
+
+func frame(_ element: AXUIElement) -> String {
+    "\(String(describing: attribute(element, kAXPositionAttribute))) \(String(describing: attribute(element, kAXSizeAttribute)))"
+}
+
+func isFocused(_ element: AXUIElement, _ target: Place) -> Bool {
+    guard let current = focusedElement() else { return false }
+    if CFEqual(current, element) || matches(current, target) { return true }
+    // Some apps hand out a new reference for the same box each time: same kind, same spot.
+    var pid: pid_t = 0
+    AXUIElementGetPid(current, &pid)
+    return pid == target.pid && string(current, kAXRoleAttribute) == target.role && frame(current) == frame(element)
+}
+
 /// Makes an app frontmost, through Accessibility first and AppKit if that does not take.
 func bringToFront(_ pid: pid_t) -> Bool {
     guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return false }
+    if isFrontmost(pid) { return true }
     let application = AXUIElementCreateApplication(pid)
     AXUIElementSetMessagingTimeout(application, 0.5)
     AXUIElementSetAttributeValue(application, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
@@ -281,97 +447,176 @@ func bringToFront(_ pid: pid_t) -> Bool {
     return wait(0.6, until: { isFrontmost(pid) })
 }
 
-/// Brings a place's app and window to the front and focuses its element. False when the
-/// element or window is gone, or focus cannot be put back on it.
-func bringBack(_ target: Place) -> Bool {
-    if isGone(target.element) || (target.element == nil && isGone(target.window)) { return false }
+/// Brings the place's app and window forward and focuses its text box. True only once the box
+/// really has focus: an app may accept the request and leave focus elsewhere.
+func bringBack(_ target: Place, _ element: AXUIElement) -> Bool {
     guard bringToFront(target.pid) else { return false }
     if let window = target.window {
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
-    guard let element = target.element else {
-        // The page keeps its own cursor; it comes back with the window.
-        usleep(200_000)
-        return true
+    if isFocused(element, target) { return true }
+    AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    return wait(0.6, until: { isFocused(element, target) })
+}
+
+/// Takes the user back to where they were before Dictait went to paste.
+func returnTo(_ away: Place?, from target: Place) {
+    guard let away else { return }
+    if away.pid != target.pid { _ = bringToFront(away.pid) }
+    if let window = away.window { AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
+    if let element = away.element { AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
+}
+
+func setClipboard(_ text: String) {
+    guard !text.isEmpty else { return }
+    let board = NSPasteboard.general
+    if board.string(forType: .string) == text { return }
+    board.clearContents()
+    board.setString(text, forType: .string)
+}
+
+/// ⌘V into the focused element at `range` (or its own cursor), then notes where the words
+/// landed for follow-ups. With `keepCursor`, a cursor the user had moved elsewhere in the same
+/// box goes back there afterwards.
+func paste(_ text: String, into element: AXUIElement?, of target: Place, at range: CFRange?, keepCursor: Bool = true) -> Bool {
+    let user = element.flatMap(selectedRange)
+    if let element, let range, user.map({ $0.location != range.location || $0.length != range.length }) ?? true {
+        setSelectedRange(element, range)
+        usleep(30_000)
     }
-    let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
-    if wait(0.4, until: { isFocused(element) }) { return true }
-    // Web views can report the same field under a new reference; trust a focus that was accepted.
-    return focused
-}
-
-/// Puts the cursor back where it was, if the text before it is still the same.
-func restoreCursor(_ target: Place) {
-    guard let element = target.element, let range = target.range else { return }
-    if let now = selectedRange(element), now.location == range.location, now.length == range.length { return }
-    let length = (target.before as NSString).length
-    guard length > 0 || range.location == 0, text(element, in: CFRange(location: range.location - length, length: length)) == target.before else { return }
-    setSelectedRange(element, range)
-    usleep(30_000)
-}
-
-/// ⌘V into a place that has focus, then notes where the words landed for follow-ups.
-func paste(into target: Place, length: Int) -> Bool {
-    let start = target.element.flatMap(selectedRange)
+    let start = element.flatMap(selectedRange)
+    setClipboard(text)
     guard paste() else { return false }
     lastInsertion = nil
-    guard let element = target.element, let start else { return true }
+    guard let element, let start else {
+        usleep(150_000) // Let ⌘V land before anything moves.
+        return true
+    }
     // The app handles ⌘V on its own time; the cursor moving shows it has.
     var end: CFRange?
-    _ = wait(0.4) {
+    _ = wait(0.6) {
         guard let now = selectedRange(element), now.location != start.location || now.length != start.length else { return false }
         end = now
         return true
     }
-    let inserted = end.map { $0.location - start.location } ?? length
+    let inserted = end.map { $0.location - start.location } ?? (text as NSString).length
     if inserted > 0 {
-        lastInsertion = Place(pid: target.pid, element: target.element, window: target.window,
-                              range: CFRange(location: start.location, length: inserted))
+        var landed = target
+        landed.element = element
+        landed.range = CFRange(location: start.location, length: inserted)
+        lastInsertion = landed
+    }
+    if keepCursor, let user, user.location != start.location || user.length != start.length {
+        let shift = user.location >= start.location + start.length ? inserted - start.length : 0
+        setSelectedRange(element, CFRange(location: user.location + shift, length: user.length))
     }
     return true
 }
 
-/// Pastes the clipboard where the dictation started. If the user has moved on, Dictait goes
-/// back there, pastes, and returns them to where they are now.
-func deliver(length: Int) -> [String: Any] {
+/// Pastes where the dictation started. If the user has moved to another box, window or app,
+/// Dictait goes back, checks it really is there, pastes and returns them. If that place is not
+/// on screen (another conversation, a closed Raycast), it waits until the user goes back.
+func deliver(_ text: String) -> [String: Any] {
     guard AXIsProcessTrusted() else { return ["outcome": "untrusted"] }
     guard let target = anchor else { return ["outcome": "no-anchor"] }
     anchor = nil
-    return pasteBack(target, length: length)
+    if let (element, range) = here(target) {
+        if target.element == nil, let element, editable(element) == false { return ["outcome": "no-target"] }
+        return ["outcome": paste(text, into: element, of: target, at: range) ? "pasted" : "failed"]
+    }
+    // Only the window was known: go back to it, if it still shows the same page.
+    guard target.element != nil else { return windowDelivery(target, text) }
+    guard showing(target), let element = locate(target), case .same(let range) = spot(of: target, in: element) else {
+        waitForReturn(target, text)
+        return ["outcome": "waiting"]
+    }
+    let away = currentPlace()
+    guard bringBack(target, element) else {
+        returnTo(away, from: target)
+        waitForReturn(target, text)
+        return ["outcome": "waiting"]
+    }
+    guard paste(text, into: element, of: target, at: range, keepCursor: false) else { return ["outcome": "failed"] }
+    returnTo(away, from: target)
+    return ["outcome": "pasted", "returned": away != nil]
+}
+
+/// Delivery to a place known only by its window, for apps that hide their text boxes: the
+/// window comes back with its page's own cursor, as long as it still shows the same page.
+func windowDelivery(_ target: Place, _ text: String) -> [String: Any] {
+    guard !target.control else { return ["outcome": "moved"] }
+    guard let window = target.window, !isGone(window) else { return ["outcome": "gone"] }
+    guard showing(target), target.page == nil || windowPage(window) == target.page else {
+        waitForReturn(target, text)
+        return ["outcome": "waiting"]
+    }
+    let away = currentPlace()
+    guard bringToFront(target.pid) else { return ["outcome": "gone"] }
+    AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+    AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    guard wait(0.6, until: { focusedWindow(target.pid).map { CFEqual($0, window) } ?? false }), let (element, _) = here(target) else {
+        returnTo(away, from: target)
+        waitForReturn(target, text)
+        return ["outcome": "waiting"]
+    }
+    usleep(150_000) // The page puts its own cursor back.
+    if let element, editable(element) == false {
+        returnTo(away, from: target)
+        return ["outcome": "no-target"]
+    }
+    guard paste(text, into: element, of: target, at: nil, keepCursor: false) else { return ["outcome": "failed"] }
+    returnTo(away, from: target)
+    return ["outcome": "pasted", "returned": away != nil]
+}
+
+/// Dictations whose place was not on screen, each pasted when the user comes back to it.
+var waiting: [(target: Place, text: String, until: Date)] = []
+var waitTimer: Timer?
+
+func waitForReturn(_ target: Place, _ text: String) {
+    waiting = Array((waiting + [(target, text, Date().addingTimeInterval(10 * 60))]).suffix(5))
+    if waitTimer == nil {
+        waitTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { _ in checkReturn() }
+    }
+}
+
+func checkReturn() {
+    waiting.removeAll { Date() >= $0.until }
+    if waiting.isEmpty { waitTimer?.invalidate(); waitTimer = nil; return }
+    guard AXIsProcessTrusted() else { return }
+    for (index, item) in waiting.enumerated() {
+        guard let (element, range) = here(item.target), item.target.element != nil || element.flatMap(editable) != false else { continue }
+        waiting.remove(at: index)
+        // Already there: the user pasted it themselves.
+        if let element, let all = wholeText(element), squashed(item.text).count > 3,
+           squashed(all as String).contains(squashed(item.text)) { return }
+        let pasted = paste(item.text, into: element, of: item.target, at: range)
+        send(["event": "delivered", "outcome": pasted ? "pasted" : "failed", "text": item.text])
+        return
+    }
 }
 
 func squashed(_ value: String) -> String {
     value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
 }
 
-/// Replaces Dictait's last insertion with the clipboard, only if it still reads as pasted.
-func replaceLast(expected: String, length: Int) -> [String: Any] {
+/// Replaces Dictait's last insertion with new text, only if it still reads as pasted.
+func replaceLast(expected: String, replacement: String) -> [String: Any] {
     guard AXIsProcessTrusted() else { return ["outcome": "untrusted"] }
-    guard let last = lastInsertion, let element = last.element, let range = last.range, !isGone(element) else { return ["outcome": "gone"] }
-    guard let current = text(element, in: range), squashed(current) == squashed(expected) else { return ["outcome": "changed"] }
-    return pasteBack(last, selecting: range, length: length)
-}
-
-/// Pastes into a place, going back to it first if focus has moved, then returning. With
-/// `selecting`, that range is replaced; otherwise the cursor goes back where it was.
-func pasteBack(_ target: Place, selecting: CFRange? = nil, length: Int) -> [String: Any] {
-    let away = currentPlace().flatMap { same($0, target) ? nil : $0 }
-    if away != nil, !bringBack(target) { return ["outcome": "gone"] }
-    if let selecting {
-        guard let element = target.element, setSelectedRange(element, selecting) else { return ["outcome": "changed"] }
-        usleep(30_000)
-    } else {
-        restoreCursor(target)
+    guard let last = lastInsertion, let range = last.range, let element = locate(last) else { return ["outcome": "gone"] }
+    guard squashed(text(element, in: range) ?? "") == squashed(expected) else { return ["outcome": "changed"] }
+    let atPlace = focusedElement().map { CFEqual($0, element) || matches($0, last) } ?? false
+    let away = atPlace ? nil : currentPlace()
+    if away != nil {
+        guard showing(last), bringBack(last, element) else {
+            returnTo(away, from: last)
+            return ["outcome": "gone"]
+        }
     }
-    guard paste(into: target, length: length) else { return ["outcome": "failed"] }
-    if let away {
-        if lastInsertion == nil { usleep(250_000) } // Let ⌘V land before focus moves on.
-        if away.pid != target.pid { _ = bringToFront(away.pid) }
-        if let window = away.window { AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
-        if let element = away.element { AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
-    }
-    return ["outcome": selecting == nil ? "pasted" : "replaced", "returned": away != nil]
+    guard paste(replacement, into: element, of: last, at: range, keepCursor: away == nil) else { return ["outcome": "failed"] }
+    returnTo(away, from: last)
+    return ["outcome": "replaced", "returned": away != nil]
 }
 
 // MARK: - Microphones
@@ -503,8 +748,8 @@ func handle(_ line: String) {
     case "focus": reply = focus(anchoring: request["anchor"] as? Bool ?? false)
     case "forget": anchor = nil; reply = ["ok": true]
     case "paste": reply = ["ok": paste()]
-    case "deliver": reply = deliver(length: request["length"] as? Int ?? 0)
-    case "replace-last": reply = replaceLast(expected: request["expected"] as? String ?? "", length: request["length"] as? Int ?? 0)
+    case "deliver": reply = deliver(request["text"] as? String ?? "")
+    case "replace-last": reply = replaceLast(expected: request["expected"] as? String ?? "", replacement: request["text"] as? String ?? "")
     case "inputs": reply = inputs()
     case "screens": reply = ["screens": screens()]
     default: reply = ["error": "Unknown command."]

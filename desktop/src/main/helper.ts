@@ -13,8 +13,12 @@ export interface FocusInfo {
   window: string
 }
 
-/** Where pasted text went: where the dictation started, or why it could not go there. */
-export type Delivery = 'pasted' | 'gone' | 'no-anchor' | 'untrusted' | 'failed'
+/**
+ * Where pasted text went: where the dictation started, or why it could not go there.
+ * 'waiting': that place is not on screen (another conversation, a closed window), so the helper
+ * pastes it when the user goes back. 'moved': no text box was known, and the user left the window.
+ */
+export type Delivery = 'pasted' | 'waiting' | 'moved' | 'no-target' | 'gone' | 'no-anchor' | 'untrusted' | 'failed'
 /** Replacing the last insertion: done, edited since (so left alone), or no longer there. */
 export type Replacement = 'replaced' | 'changed' | 'gone' | 'untrusted' | 'failed'
 
@@ -83,6 +87,10 @@ export class NativeHelper extends EventEmitter {
       this.emit('hotkey', String(message.name), message.state === 'down')
       return
     }
+    if (message.event === 'delivered') {
+      this.emit('delivered', String(message.text ?? ''), message.outcome === 'pasted')
+      return
+    }
     const waiter = this.pending.get(Number(message.id))
     if (!waiter) return
     this.pending.delete(Number(message.id))
@@ -125,15 +133,18 @@ export class NativeHelper extends EventEmitter {
     void this.request('forget')
   }
 
-  /** Pastes the clipboard where the dictation started, going back there if focus has moved. */
+  /**
+   * Pastes the text where the dictation started, going back there if focus has moved. A slow
+   * or missing reply is 'failed', never a paste wherever the cursor happens to be.
+   */
   async deliver(text: string): Promise<Delivery> {
-    const outcome = (await this.request('deliver', { length: text.length }, 4000)).outcome
-    return typeof outcome === 'string' ? outcome as Delivery : 'no-anchor'
+    const outcome = (await this.request('deliver', { text }, 10000)).outcome
+    return typeof outcome === 'string' ? outcome as Delivery : 'failed'
   }
 
   /** Swaps Dictait's last insertion, still reading `expected`, for the clipboard. */
   async replaceLast(expected: string, text: string): Promise<Replacement> {
-    const outcome = (await this.request('replace-last', { expected, length: text.length }, 4000)).outcome
+    const outcome = (await this.request('replace-last', { expected, text }, 8000)).outcome
     return typeof outcome === 'string' ? outcome as Replacement : 'gone'
   }
 
