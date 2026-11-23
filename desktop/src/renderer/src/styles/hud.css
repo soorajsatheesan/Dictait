@@ -6,10 +6,10 @@ body.hud { overflow: hidden; }
 .stage { position: fixed; inset: 0; display: flex; justify-content: center; align-items: flex-start; pointer-events: none; }
 
 .island { position: relative; background: #000; color: #fff; will-change: width, height; }
-/* Inverse corners flare into the top edge, like the notch itself. */
-.island::before, .island::after { content: ''; position: absolute; top: 0; width: 12px; height: 12px; pointer-events: none; }
-.island::before { left: -12px; background: radial-gradient(circle at 0 100%, transparent 11.5px, #000 12px); }
-.island::after { right: -12px; background: radial-gradient(circle at 100% 100%, transparent 11.5px, #000 12px); }
+/* Inverse corners flare into the top edge only on notched screens while open. */
+.island.notched.open::before, .island.notched.open::after { content: ''; position: absolute; top: 0; width: 12px; height: 12px; pointer-events: none; }
+.island.notched.open::before { left: -12px; background: radial-gradient(circle at 0 100%, transparent 11.5px, #000 12px); }
+.island.notched.open::after { right: -12px; background: radial-gradient(circle at 100% 100%, transparent 11.5px, #000 12px); }
 .island-clip {
   position: absolute; inset: 0; overflow: hidden;
   background:
@@ -38,19 +38,27 @@ body.hud { overflow: hidden; }
 .waveform { flex: 1; display: block; }
 .island-time { font: 600 13px/1 var(--font-ui); font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.86); min-width: 34px; text-align: right; }
 .island-time.late { color: #FF9456; }
-.island-sub { display: flex; align-items: center; justify-content: center; gap: 6px; height: 22px; margin-top: -6px; padding: 0 20px; font-size: 11px; color: rgba(255, 255, 255, 0.5); white-space: nowrap; }
+.island-sub { display: flex; align-items: center; justify-content: center; gap: 6px; height: 22px; margin-top: -6px; padding: 0 20px; font-size: 11px; color: rgba(255, 255, 255, 0.74); white-space: nowrap; }
 .island-sub kbd { padding: 1px 5px; border-radius: 4px; font: 600 10px/1.4 var(--font-ui); color: rgba(255, 255, 255, 0.8); background: rgba(255, 255, 255, 0.12); }
 .island-sub .sep { width: 3px; height: 3px; margin: 0 4px; border-radius: 50%; background: rgba(255, 255, 255, 0.3); }
 .island-sub.note { color: #FF9456; }
 .island-sub.editing { color: #FFD3B8; }
+.island-sub.holdPending, .island-sub.holding { color: #FFD3B8; }
+.hold-progress { width: 28px; height: 3px; overflow: hidden; border-radius: 2px; background: rgba(255, 148, 86, 0.2); }
+.hold-progress > span { display: block; width: 100%; height: 100%; border-radius: inherit; background: #FF9456; transform: scaleX(0); transform-origin: left; }
+.hold-active-dot { width: 5px; height: 5px; border-radius: 50%; background: #FF9456; box-shadow: 0 0 8px rgba(255, 148, 86, 0.35); }
 .island-sub.live { justify-content: stretch; }
 .live-text { display: flex; justify-content: flex-end; width: 100%; overflow: hidden; font-size: 12.5px; color: rgba(255, 255, 255, 0.82); -webkit-mask-image: linear-gradient(90deg, transparent, #000 22%); mask-image: linear-gradient(90deg, transparent, #000 22%); }
 .live-inner { white-space: nowrap; }
 
 .island-icon { display: grid; place-items: center; width: 22px; height: 22px; flex: none; color: rgba(255, 255, 255, 0.9); }
 .island-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.island-title { font: 620 13.5px/1.2 var(--font-ui); letter-spacing: -0.005em; white-space: nowrap; }
-.island-detail { font-size: 11.5px; line-height: 1.35; color: rgba(255, 255, 255, 0.55); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.island-title { font: 620 13.5px/1.2 var(--font-ui); letter-spacing: -0.005em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.island-detail { font-size: 11.5px; line-height: 1.35; color: rgba(255, 255, 255, 0.74); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.island-destination { display: flex; align-items: center; justify-content: center; gap: 6px; height: 26px; padding: 0 20px 7px; color: rgba(255, 255, 255, 0.76); font-size: 11px; }
+.island-destination img, .island-destination svg { flex: none; }
+.island-destination span, .island-mic-warning span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.island-mic-warning { display: flex; align-items: center; justify-content: center; gap: 6px; height: 30px; padding: 0 20px; color: #FFD3B8; font-size: 11px; }
 .kind-done .island-icon, .kind-copied .island-icon { color: #3DD68C; }
 .kind-failed .island-icon, .kind-empty .island-icon { color: #F5B544; }
 .kind-cancelled .island-icon { color: rgba(255, 255, 255, 0.6); }

@@ -24,8 +24,17 @@ interface GraphEdge extends SimulationLinkDatum<GraphNode> {
   weight: number
 }
 
-const MAX_NOTES = 150
+export const MAX_GRAPH_NOTES = 150
 const MIN_ZOOM = 0.25, MAX_ZOOM = 4
+
+/** Terms shown in the graph: terms from the visible note slice plus any terms-only entries (not tied to older notes). */
+export function visibleGraphSlice(archive: ArchiveModel): { notes: ArchivedNote[]; terms: ArchivedTerm[] } {
+  const notes = archive.notes.slice(0, MAX_GRAPH_NOTES)
+  const used = new Set(notes.flatMap((note) => note.terms))
+  const allNoteTerms = new Set(archive.notes.flatMap((note) => note.terms))
+  const terms = archive.terms.filter((term) => used.has(term.id) || !allNoteTerms.has(term.id))
+  return { notes, terms }
+}
 
 function seed(id: string): number {
   let hash = 2166136261
@@ -33,16 +42,18 @@ function seed(id: string): number {
   return ((hash >>> 0) % 10_000) / 10_000
 }
 
+function edgePath(kind: GraphEdge['kind'], ax: number, ay: number, bx: number, by: number): string {
+  return kind === 'cooccur'
+    ? `M${ax},${ay} Q${(ax + bx) / 2 + (by - ay) * 0.14},${(ay + by) / 2 - (bx - ax) * 0.14} ${bx},${by}`
+    : `M${ax},${ay} L${bx},${by}`
+}
+
 export function GraphView({ archive, search, selectedTerm, selectedNote, onSelectTerm, onSelectNote, onOpenInNotes }: {
   archive: ArchiveModel; search: string; selectedTerm: number | null; selectedNote: string | null
   onSelectTerm: (id: number | null) => void; onSelectNote: (id: string | null) => void; onOpenInNotes: (id: string) => void
 }) {
-  // The graph draws the most recent notes for responsiveness; Notes searches everything.
-  const notes = useMemo(() => archive.notes.slice(0, MAX_NOTES), [archive.notes])
-  const terms = useMemo(() => {
-    const used = new Set(notes.flatMap((note) => note.terms))
-    return archive.terms.filter((term) => used.has(term.id) || notes.length === 0)
-  }, [archive.terms, notes])
+  // The graph draws the most recent notes plus terms-only entries; Notes searches everything.
+  const { notes, terms } = useMemo(() => visibleGraphSlice(archive), [archive])
 
   const graph = useMemo(() => {
     const termIDs = new Set(terms.map((term) => term.id))
@@ -50,6 +61,7 @@ export function GraphView({ archive, search, selectedTerm, selectedNote, onSelec
       ...terms.map((term, order) => ({ id: `t:${term.id}`, type: 'term' as const, term, order, r: 4.5 + Math.min(10, Math.sqrt(term.mentions) * 2.3) })),
       ...notes.map((note, order) => ({ id: `n:${note.id}`, type: 'note' as const, note, order: terms.length + order, r: 4.2 }))
     ]
+    const nodesById = new Map(nodes.map((node) => [node.id, node]))
     const edges: GraphEdge[] = []
     for (const link of archive.links) {
       if (termIDs.has(link.source) && termIDs.has(link.target)) edges.push({ id: `l:${link.source}:${link.target}`, source: `t:${link.source}`, target: `t:${link.target}`, kind: 'cooccur', weight: link.weight })
@@ -64,7 +76,7 @@ export function GraphView({ archive, search, selectedTerm, selectedNote, onSelec
       if (!neighbors.has(b)) neighbors.set(b, new Set())
       neighbors.get(a)!.add(b); neighbors.get(b)!.add(a)
     }
-    return { nodes, edges, neighbors }
+    return { nodes, nodesById, edges, neighbors }
   }, [terms, notes, archive.links])
 
   if (archive.loaded && graph.nodes.length === 0) {
@@ -86,7 +98,7 @@ export function GraphView({ archive, search, selectedTerm, selectedNote, onSelec
 }
 
 function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, onSelectNote, counts }: {
-  graph: { nodes: GraphNode[]; edges: GraphEdge[]; neighbors: Map<string, Set<string>> }
+  graph: { nodes: GraphNode[]; nodesById: Map<string, GraphNode>; edges: GraphEdge[]; neighbors: Map<string, Set<string>> }
   search: string; selectedTerm: number | null; selectedNote: string | null
   onSelectTerm: (id: number | null) => void; onSelectNote: (id: string | null) => void
   counts: { notes: number; terms: number; total: number }
@@ -94,14 +106,39 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
   const container = useRef<HTMLDivElement>(null)
   const layer = useRef<SVGGElement>(null)
   const grid = useRef<SVGPatternElement>(null)
+  const tipEl = useRef<HTMLDivElement>(null)
+  const nodeEls = useRef(new Map<string, SVGGElement>())
+  const edgeEls = useRef(new Map<string, SVGPathElement>())
+  const labelEls = useRef(new Map<string, SVGTextElement>())
   const simulation = useRef<Simulation<GraphNode, GraphEdge> | null>(null)
   const positions = useRef(new Map<string, { x: number; y: number }>())
   const fitted = useRef(false)
-  const [, setFrame] = useState(0)
   const [size, setSize] = useState({ width: 0, height: 0 })
+  const sizeRef = useRef(size)
+  sizeRef.current = size
   const [hovered, setHovered] = useState<string | null>(null)
   const [zoomedIn, setZoomedIn] = useState(false)
   const tx = useMotionValue(0), ty = useMotionValue(0), k = useMotionValue(1)
+
+  const hoveredNode = hovered ? graph.nodesById.get(hovered) : undefined
+  const hoveredRef = useRef<GraphNode | undefined>(undefined)
+  hoveredRef.current = hoveredNode
+
+  const positionTip = useCallback((node: GraphNode | undefined) => {
+    const tip = tipEl.current
+    if (!tip || !node) return
+    const { width } = sizeRef.current
+    const rawX = (node.x ?? 0) * k.get() + tx.get()
+    const rawY = (node.y ?? 0) * k.get() + ty.get()
+    const clampedX = width > 280 ? Math.max(140, Math.min(width - 140, rawX)) : rawX
+    const below = rawY < 110
+    tip.style.left = `${clampedX}px`
+    tip.style.top = `${rawY}px`
+    tip.style.transform = below ? 'translate(-50%, 16px)' : 'translate(-50%, calc(-100% - 14px))'
+  }, [k, tx, ty])
+
+  // Sync tooltip position whenever the hovered node changes or enters the DOM.
+  useEffect(() => { positionTip(hoveredNode) }, [hoveredNode, positionTip, size])
 
   // Pan and zoom live in motion values and write the transform directly: no React renders while moving.
   useEffect(() => {
@@ -110,11 +147,12 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
       layer.current?.setAttribute('transform', transform)
       grid.current?.setAttribute('patternTransform', transform)
       setZoomedIn(k.get() >= 1.45)
+      positionTip(hoveredRef.current)
     }
     update()
     const offs = [tx.on('change', update), ty.on('change', update), k.on('change', update)]
     return () => offs.forEach((off) => off())
-  }, [tx, ty, k])
+  }, [tx, ty, k, positionTip])
 
   useEffect(() => {
     const element = container.current
@@ -139,6 +177,27 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
     } else { k.set(scale); tx.set(targetX); ty.set(targetY) }
   }, [size, graph.nodes, k, tx, ty])
 
+  // Update SVG element coordinates directly per physics tick (no 60 FPS React tree re-renders).
+  const applyPositions = useCallback(() => {
+    for (const node of graph.nodes) {
+      const x = node.x ?? 0, y = node.y ?? 0
+      positions.current.set(node.id, { x, y })
+      nodeEls.current.get(node.id)?.setAttribute('transform', `translate(${x} ${y})`)
+      const label = labelEls.current.get(node.id)
+      if (label) {
+        label.setAttribute('x', String(x))
+        label.setAttribute('y', String(y + node.r + 14))
+      }
+    }
+    for (const edge of graph.edges) {
+      const a = typeof edge.source === 'object' ? (edge.source as GraphNode) : graph.nodesById.get(edge.source as string)
+      const b = typeof edge.target === 'object' ? (edge.target as GraphNode) : graph.nodesById.get(edge.target as string)
+      if (!a || !b) continue
+      edgeEls.current.get(edge.id)?.setAttribute('d', edgePath(edge.kind, a.x ?? 0, a.y ?? 0, b.x ?? 0, b.y ?? 0))
+    }
+    positionTip(hoveredRef.current)
+  }, [graph, positionTip])
+
   // A live force layout that settles into place, keeping positions across refreshes.
   useEffect(() => {
     const known = positions.current
@@ -162,15 +221,13 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
       .stop()
     // Pre-settle new layouts, then let them breathe into place.
     if (fresh > graph.nodes.length / 3) for (let index = 0; index < 200; index++) sim.tick()
+    applyPositions()
     sim.alpha(fresh ? 0.3 : 0.05)
-    sim.on('tick', () => {
-      for (const node of graph.nodes) known.set(node.id, { x: node.x ?? 0, y: node.y ?? 0 })
-      setFrame((frame) => frame + 1)
-    })
+    sim.on('tick', applyPositions)
     sim.restart()
     simulation.current = sim
     return () => { sim.stop() }
-  }, [graph])
+  }, [graph, applyPositions])
 
   useEffect(() => {
     if (!fitted.current && size.width && graph.nodes.length) { fitted.current = true; fit(false); k.set(k.get() * 0.9); fit(true) }
@@ -233,6 +290,7 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
     if (event.button !== 0) return
     event.stopPropagation()
     const target = event.currentTarget
+    const activeSim = simulation.current
     target.setPointerCapture(event.pointerId)
     const rect = container.current!.getBoundingClientRect()
     const toGraph = (x: number, y: number) => ({ x: (x - rect.left - tx.get()) / k.get(), y: (y - rect.top - ty.get()) / k.get() })
@@ -241,8 +299,9 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
     const originX = event.clientX, originY = event.clientY
     let dragging = false
     const move = (next: PointerEvent) => {
+      if (simulation.current !== activeSim) return
       if (!dragging && Math.hypot(next.clientX - originX, next.clientY - originY) < 4) return
-      if (!dragging) { dragging = true; simulation.current?.alphaTarget(0.25).restart() }
+      if (!dragging) { dragging = true; activeSim?.alphaTarget(0.25).restart() }
       const point = toGraph(next.clientX, next.clientY)
       node.fx = point.x + offsetX; node.fy = point.y + offsetY
     }
@@ -251,7 +310,7 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
       target.removeEventListener('pointerup', up)
       target.removeEventListener('pointercancel', up)
       node.fx = null; node.fy = null
-      simulation.current?.alphaTarget(0)
+      if (simulation.current === activeSim) activeSim?.alphaTarget(0)
       if (dragging) return
       if (node.type === 'term') { onSelectTerm(node.term!.id); onSelectNote(null) }
       else { onSelectNote(node.note!.id); onSelectTerm(null) }
@@ -273,7 +332,6 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
   }, [hovered, selectedID, query, graph])
   const center = hovered ?? selectedID
   const topTerms = useMemo(() => new Set(graph.nodes.filter((node) => node.type === 'term').slice(0, 14).map((node) => node.id)), [graph.nodes])
-  const hoveredNode = hovered ? graph.nodes.find((node) => node.id === hovered) : undefined
   const presentKinds = useMemo(() => {
     const tally = new Map<string, number>()
     for (const node of graph.nodes) {
@@ -283,6 +341,14 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
     }
     return [...tally].sort((a, b) => b[1] - a[1])
   }, [graph.nodes])
+
+  const initialPos = (node: GraphNode) => {
+    if (node.x !== undefined && node.y !== undefined) return { x: node.x, y: node.y }
+    const known = positions.current.get(node.id)
+    if (known) return known
+    const angle = seed(node.id) * Math.PI * 2, radius = 40 + seed(node.id + '#') * 160
+    return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }
+  }
 
   return (
     <div className="graph" ref={container}>
@@ -300,15 +366,14 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
         <g ref={layer}>
           <g className="graph-edges">
             {graph.edges.map((edge) => {
-              const a = edge.source as GraphNode, b = edge.target as GraphNode
-              if (typeof a !== 'object' || typeof b !== 'object') return null
+              const a = typeof edge.source === 'object' ? (edge.source as GraphNode) : graph.nodesById.get(edge.source as string)
+              const b = typeof edge.target === 'object' ? (edge.target as GraphNode) : graph.nodesById.get(edge.target as string)
+              if (!a || !b) return null
               const lit = center !== null && (a.id === center || b.id === center)
               const dim = focus !== null && !(focus.has(a.id) && focus.has(b.id))
-              const ax = a.x ?? 0, ay = a.y ?? 0, bx = b.x ?? 0, by = b.y ?? 0
-              const path = edge.kind === 'cooccur'
-                ? `M${ax},${ay} Q${(ax + bx) / 2 + (by - ay) * 0.14},${(ay + by) / 2 - (bx - ax) * 0.14} ${bx},${by}`
-                : `M${ax},${ay} L${bx},${by}`
-              return <path key={edge.id} d={path} className={`graph-edge ${edge.kind} ${lit ? 'lit' : ''} ${dim ? 'dim' : ''}`}
+              const pa = initialPos(a), pb = initialPos(b)
+              return <path key={edge.id} ref={(el) => { if (el) edgeEls.current.set(edge.id, el); else edgeEls.current.delete(edge.id) }}
+                d={edgePath(edge.kind, pa.x, pa.y, pb.x, pb.y)} className={`graph-edge ${edge.kind} ${lit ? 'lit' : ''} ${dim ? 'dim' : ''}`}
                 style={edge.kind === 'cooccur' ? { strokeWidth: Math.min(2.6, 0.8 + edge.weight * 0.35) } : undefined} />
             })}
           </g>
@@ -316,10 +381,12 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
             {graph.nodes.map((node) => {
               const dim = focus !== null && !focus.has(node.id)
               const selected = node.id === selectedID
+              const pos = initialPos(node)
               const style = { '--i': Math.min(node.order, 60), ...(node.term ? { '--kind': kindOf(node.term.kind).color } : {}) } as React.CSSProperties
               return (
-                <g key={node.id} className={`graph-node ${node.type} ${dim ? 'dim' : ''} ${selected ? 'selected' : ''}`} style={style}
-                  transform={`translate(${node.x ?? 0} ${node.y ?? 0})`}
+                <g key={node.id} ref={(el) => { if (el) nodeEls.current.set(node.id, el); else nodeEls.current.delete(node.id) }}
+                  className={`graph-node ${node.type} ${dim ? 'dim' : ''} ${selected ? 'selected' : ''}`} style={style}
+                  transform={`translate(${pos.x} ${pos.y})`}
                   onPointerDown={(event) => startDrag(event, node)}
                   onPointerEnter={() => setHovered(node.id)} onPointerLeave={() => setHovered((value) => (value === node.id ? null : value))}>
                   <g className="graph-body">
@@ -347,8 +414,10 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
               const show = zoomedIn || topTerms.has(node.id) || (focus?.has(node.id) ?? false)
               if (!show) return null
               const dim = focus !== null && !focus.has(node.id)
+              const pos = initialPos(node)
               return (
-                <text key={node.id} x={node.x ?? 0} y={(node.y ?? 0) + node.r + 14}
+                <text key={node.id} ref={(el) => { if (el) labelEls.current.set(node.id, el); else labelEls.current.delete(node.id) }}
+                  x={pos.x} y={pos.y + node.r + 14}
                   className={`graph-label ${dim ? 'dim' : ''} ${node.id === center ? 'strong' : ''}`}>{node.term!.name}</text>
               )
             })}
@@ -359,8 +428,7 @@ function GraphCanvas({ graph, search, selectedTerm, selectedNote, onSelectTerm, 
 
       <AnimatePresence>
         {hoveredNode?.note && (
-          <motion.div key={hoveredNode.id} className="graph-tip" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.12 }}
-            style={{ left: (hoveredNode.x ?? 0) * k.get() + tx.get(), top: (hoveredNode.y ?? 0) * k.get() + ty.get() }}>
+          <motion.div ref={tipEl} key={hoveredNode.id} className="graph-tip" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.12 }}>
             <div className="eyebrow">{dayLabel(hoveredNode.note.created)} · {timeLabel(hoveredNode.note.created)}</div>
             <div className="graph-tip-body">{hoveredNode.note.body.slice(0, 140)}{hoveredNode.note.body.length > 140 ? '…' : ''}</div>
           </motion.div>

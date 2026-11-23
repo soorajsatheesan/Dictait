@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import sqlite3
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -12,14 +14,33 @@ from pathlib import Path
 SUPPORT = Path.home() / "Library" / "Application Support" / "Dictait"
 
 
+def _write_atomic(path: Path, text: str, mode: int | None = None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if mode is not None:
+            tmp.chmod(mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 class MemoryStore:
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else SUPPORT / "memory.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=0.2)
+        self.db = sqlite3.connect(self.path, timeout=5.0)
         self.path.chmod(0o600)
         self.db.executescript("""
             PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 5000;
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS terms (
                 id INTEGER PRIMARY KEY, term TEXT NOT NULL, normalized TEXT NOT NULL UNIQUE,
@@ -75,12 +96,20 @@ class MemoryStore:
                 self.db.execute("INSERT INTO note_search(id,body) VALUES(?,?)", (note_id, text))
                 self.db.executemany("INSERT INTO note_terms VALUES(?,?)", [(note_id, term_id) for term_id in ordered])
             # Bound prompt memory and graph size, retaining frequently/recently used terms.
-            stale = self.db.execute("SELECT id FROM terms ORDER BY uses DESC,last_used DESC LIMIT -1 OFFSET 2000").fetchall()
-            for (term_id,) in stale:
+            stale = self.db.execute("SELECT id, term FROM terms ORDER BY uses DESC,last_used DESC LIMIT -1 OFFSET 2000").fetchall()
+            for term_id, term in stale:
                 self.db.execute("DELETE FROM links WHERE source=? OR target=?", (term_id, term_id))
                 self.db.execute("DELETE FROM note_terms WHERE term_id=?", (term_id,))
                 self.db.execute("DELETE FROM term_search WHERE rowid=?", (term_id,))
                 self.db.execute("DELETE FROM terms WHERE id=?", (term_id,))
+        if stale:
+            vault = self.path.parent / "Notes"
+            for term_id, term in stale:
+                orphan = vault / f"{self.term_filename(term, term_id)}.md"
+                try:
+                    orphan.unlink()
+                except OSError:
+                    pass
         return note_id
 
     def vocabulary(self, limit=60, query=None):
@@ -135,7 +164,8 @@ class MemoryStore:
         links = " ".join(f"[[{name}]]" for name in names.values())
         title = time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(created))
         note_file = f"Dictation {title}-{note_id[:8]}"
-        (destination / f"{note_file}.md").write_text(f"# Dictation {title}\n\n{body}\n\n{links}\n\nLanguage: {language or 'unknown'}\n", encoding="utf-8")
+        mode = 0o600 if automatic else None
+        _write_atomic(destination / f"{note_file}.md", f"# Dictation {title}\n\n{body}\n\n{links}\n\nLanguage: {language or 'unknown'}\n", mode=mode)
         for term_id, term, kind, uses in rows:
             neighbors = self.db.execute("""SELECT t.id,t.term,l.weight FROM terms t JOIN links l
                 ON t.id=CASE WHEN l.source=? THEN l.target ELSE l.source END
@@ -144,14 +174,12 @@ class MemoryStore:
             notes = self.db.execute("SELECT n.id,n.created FROM notes n JOIN note_terms nt ON nt.note_id=n.id WHERE nt.term_id=? ORDER BY n.created DESC LIMIT 30", (term_id,)).fetchall()
             note_links = "\n".join(f"- [[Dictation {time.strftime('%Y-%m-%d %H-%M-%S', time.localtime(timestamp))}-{identifier[:8]}]]" for identifier, timestamp in notes)
             text = f"# {term}\n\nType: {kind} · Mentions: {uses}\n\n## Related terms\n\n{related}\n\n## Dictations\n\n{note_links}\n"
-            (destination / f"{names[term_id]}.md").write_text(text, encoding="utf-8")
+            _write_atomic(destination / f"{names[term_id]}.md", text, mode=mode)
         index = destination / "Dictait.md"
         if not index.exists():
-            index.write_text("# Dictait memory\n\nThis vault is maintained by Dictait. Open the graph view to explore terms and dictations. Connections mean terms were mentioned together, not proven factual relationships.\n", encoding="utf-8")
+            _write_atomic(index, "# Dictait memory\n\nThis vault is maintained by Dictait. Open the graph view to explore terms and dictations. Connections mean terms were mentioned together, not proven factual relationships.\n", mode=mode)
         if automatic:
             destination.chmod(0o700)
-            for filename in [f"{note_file}.md", "Dictait.md"] + [f"{name}.md" for name in names.values()]:
-                (destination / filename).chmod(0o600)
         if refresh_graph:
             self.refresh_graph(destination)
 
@@ -171,15 +199,18 @@ class MemoryStore:
         encoded = encoded.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
         template = Path(__file__).with_name("memory_graph.html").read_text(encoding="utf-8")
         graph = destination / "graph.html"
-        graph.write_text(template.replace("__DICTAIT_DATA__", encoded), encoding="utf-8")
-        graph.chmod(0o600)
+        _write_atomic(graph, template.replace("__DICTAIT_DATA__", encoded), mode=0o600)
 
-    def attach_terms(self, note_id, entities):
+    def attach_terms(self, note_id, entities, text=None):
+        lowered = text.casefold() if isinstance(text, str) else None
         with self.db:
             for entity in entities:
                 if not isinstance(entity, dict) or not isinstance(entity.get("term"), str):
                     continue
-                row = self.db.execute("SELECT id FROM terms WHERE normalized=?", (entity["term"].strip().casefold(),)).fetchone()
+                term = entity["term"].strip()
+                if not term or (lowered is not None and term.casefold() not in lowered):
+                    continue
+                row = self.db.execute("SELECT id FROM terms WHERE normalized=?", (term.casefold(),)).fetchone()
                 if row:
                     self.db.execute("INSERT OR IGNORE INTO note_terms VALUES(?,?)", (note_id, row[0]))
 
@@ -221,9 +252,13 @@ with would write yeah yes yesterday yet you your monday tuesday wednesday thursd
 """.split())
 
 
+WORD_RE = re.compile(r"[^\W_][\w'\u0900-\u097f]*")
+
+
 def meaningful(term):
     """A learned term worth keeping: at least one word that is not an everyday word."""
-    return any(word not in COMMON for word in re.findall(r"[a-z0-9']+", term.casefold()))
+    words = WORD_RE.findall(term.casefold())
+    return bool(words) and any(word not in COMMON for word in words)
 
 
 @functools.lru_cache(maxsize=1)
@@ -238,9 +273,9 @@ def dictionary():
 
 def name_like(term):
     """A guessed term must contain a word that is neither everyday nor in the dictionary, so a
-    capitalized "Climb" or "Who" never becomes a spelling hint, while "GitHub" or "Everest" can."""
-    words = re.findall(r"[a-z0-9']+", term.casefold())
-    if all(word in COMMON for word in words):
+    capitalized "Climb" or "Who" never becomes a spelling hint, while "GitHub", "Everest" or Hindi names can."""
+    words = WORD_RE.findall(term.casefold())
+    if not words or all(word in COMMON for word in words):
         return False
     if len(words) == 1:
         return words[0] not in dictionary()

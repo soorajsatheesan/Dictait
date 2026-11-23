@@ -9,6 +9,10 @@ const titles: Record<Phase, string> = {
   recording: 'Listening', transcribing: 'Transcribing', cleaning: 'Tidying your words', failed: 'Needs attention'
 }
 
+function clip(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text
+}
+
 /** Menu bar control; the menu is rebuilt on every open so it always reflects live state. */
 export class StatusMenu {
   private tray: Tray
@@ -46,13 +50,14 @@ export class StatusMenu {
     const set = (patch: Parameters<Coordinator['setSettings']>[0]) => () => model.setSettings(patch)
     const items: MenuItemConstructorOptions[] = [
       { label: titles[state.phase], enabled: false },
-      { label: state.message.slice(0, 90), enabled: false }
+      { label: clip(state.message, 90), enabled: false }
     ]
-    if (state.notice) items.push({ label: state.notice.slice(0, 140), enabled: false })
+    if (state.notice) items.push({ label: clip(state.notice, 140), enabled: false })
     items.push(
       { type: 'separator' },
       { label: 'Open Dictait', click: () => this.desktop.show() },
       { label: 'Settings…', click: () => this.desktop.show('settings') },
+      { label: 'Practice dictation…', click: () => this.desktop.show('practice') },
       {
         label: state.phase === 'recording' ? 'Finish dictation' : 'Start dictation', accelerator: 'Control+Space', registerAccelerator: false,
         enabled: ['ready', 'recording'].includes(state.phase), click: () => model.toggleRecording()
@@ -62,14 +67,16 @@ export class StatusMenu {
     if (state.phase === 'failed') items.push({ label: 'Retry models', click: () => model.reloadModels() })
     if (!state.microphoneAllowed) items.push({ label: 'Allow microphone…', click: () => model.requestMicrophone() })
     if (settings.autoPaste && !state.accessibilityAllowed) items.push({ label: 'Allow automatic paste…', click: () => model.requestAccessibility() })
-    if (!state.shortcutRegistered) items.push({ label: 'Retry Control–Space shortcut', click: () => void model.registerShortcut() })
+    if (!state.shortcutRegistered || !state.correctionShortcutRegistered) items.push({ label: 'Retry keyboard shortcuts', click: () => void model.registerShortcut() })
     if (state.history.length) {
+      const canPaste = state.phase === 'ready'
       items.push(
-        { label: 'Paste last dictation', accelerator: 'Control+Alt+V', registerAccelerator: false, click: () => void model.pasteLast() },
+        { label: 'Paste last dictation', accelerator: 'Control+Alt+V', registerAccelerator: false, enabled: canPaste, click: () => void model.pasteLast() },
         {
-          label: 'Recent dictations', submenu: state.history.map((entry, index) => ({
+          label: 'Recent dictations', enabled: canPaste, submenu: state.history.map((entry, index) => ({
             label: entry.text.replace(/\s+/g, ' ').slice(0, 60) + (entry.text.length > 60 ? '…' : ''),
             sublabel: [new Date(entry.at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), entry.app].filter(Boolean).join(' · '),
+            enabled: canPaste,
             click: () => void model.pasteLast(index)
           }))
         }
@@ -104,7 +111,12 @@ export class StatusMenu {
           { label: 'Memory off', type: 'radio', checked: settings.memoryMode === 'off', click: set({ memoryMode: 'off' }) },
           { type: 'separator' },
           { label: 'Personal vocabulary…', click: () => this.desktop.show('vocabulary') },
-          { label: 'Learn correction from clipboard', enabled: Boolean(state.transcript), click: () => void model.learnCorrectionFromClipboard() },
+          {
+            label: 'Review correction from clipboard…', enabled: Boolean(state.transcript) && state.phase === 'ready',
+            click: () => void model.learnCorrectionFromClipboard().then((feedback) => {
+              if (!feedback.startsWith('Review')) model.notify('Nothing to review', feedback)
+            })
+          },
           { label: 'Remember saved corrections', type: 'checkbox', checked: settings.learnCorrections, click: set({ learnCorrections: !settings.learnCorrections }) },
           { label: 'Open memory folder', click: () => openFolder('memory') },
           { label: 'Open linked notes folder', click: () => openFolder('notes') },

@@ -26,7 +26,7 @@ export function loadPersonal(): Personalization {
 
 export function savePersonal(value: Personalization): void {
   mkdirSync(SUPPORT, { recursive: true })
-  const temporary = `${file}.tmp`
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
   writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
   renameSync(temporary, file)
 }

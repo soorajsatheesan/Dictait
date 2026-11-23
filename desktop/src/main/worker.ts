@@ -10,14 +10,26 @@ export type WorkerEvent = Record<string, unknown> & { event?: string }
 export class ModelWorker {
   onEvent: (event: WorkerEvent) => void = () => {}
   private process: ChildProcessWithoutNullStreams | null = null
+  private exiting: Promise<void> = Promise.resolve()
   private log: number | null = null
+  private generation = 0
 
   start(backend: string, cleanup: boolean): void {
-    this.stop()
     try { accessSync(paths.python, constants.X_OK) } catch {
       throw new Error('The speech engine is missing. Reinstall Dictait, or run install-macos.sh from the source.')
     }
     if (!existsSync(paths.worker)) throw new Error('The model worker is missing. Reinstall Dictait.')
+    const token = ++this.generation
+    const prior = this.stop()
+    const launch = () => {
+      if (token !== this.generation) return
+      this.spawnWorker(backend, cleanup, token)
+    }
+    if (prior) void prior.then(launch)
+    else launch()
+  }
+
+  private spawnWorker(backend: string, cleanup: boolean, token: number): void {
     mkdirSync(SUPPORT, { recursive: true })
     const logPath = join(SUPPORT, 'worker.log')
     // Bound logs across launches; audio and transcripts are never written here.
@@ -27,6 +39,11 @@ export class ModelWorker {
       env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONNOUSERSITE: '1', TOKENIZERS_PARALLELISM: 'false', HF_HUB_DISABLE_TELEMETRY: '1', DO_NOT_TRACK: '1' },
       stdio: ['pipe', 'pipe', this.log]
     }) as unknown as ChildProcessWithoutNullStreams
+    if (token !== this.generation) {
+      child.stdin.end()
+      child.kill('SIGTERM')
+      return
+    }
     this.process = child
     let buffer = ''
     child.stdout.setEncoding('utf8')
@@ -60,15 +77,28 @@ export class ModelWorker {
     child.stdin.write(JSON.stringify(request) + '\n')
   }
 
-  stop(): void {
+  stop(): Promise<void> | null {
+    this.generation++
     const old = this.process
     this.process = null // Suppress intentional termination callbacks.
+    if (this.log !== null) { try { closeSync(this.log) } catch { /* already closed */ } this.log = null }
     if (old && old.exitCode === null) {
+      const done = new Promise<void>((resolve) => {
+        const finish = () => { clearTimeout(killer); resolve() }
+        old.once('exit', finish)
+        old.once('error', finish)
+        // Ensure the old MLX process releases unified memory before a replacement starts.
+        const killer = setTimeout(() => {
+          if (old.exitCode === null) old.kill('SIGKILL')
+          resolve()
+        }, 2000)
+        killer.unref()
+      })
       old.stdin.end()
       old.kill('SIGTERM')
-      // SIGTERM usually suffices; ensure an inference stuck in native code cannot linger.
-      setTimeout(() => { if (old.exitCode === null) old.kill('SIGKILL') }, 2000).unref()
+      this.exiting = done
+      return done
     }
-    if (this.log !== null) { try { closeSync(this.log) } catch { /* already closed */ } this.log = null }
+    return this.exiting
   }
 }

@@ -26,7 +26,8 @@ function words(): Set<string> {
 
 /** Same rule as the worker: a guessed term must read like a name, not a capitalized ordinary word. */
 function nameLike(term: string): boolean {
-  const parts = term.toLowerCase().match(/[a-z0-9']+/g) ?? []
+  const parts = term.toLowerCase().match(/[\p{L}\p{N}\p{M}']+/gu) ?? []
+  if (parts.length === 0) return false
   if (parts.every((word) => COMMON.has(word))) return false
   const ordinary = (word: string) => COMMON.has(word) || words().has(word)
   if (parts.length === 1) return !ordinary(parts[0])

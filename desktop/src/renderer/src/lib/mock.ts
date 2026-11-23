@@ -55,12 +55,12 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
   const state: AppState = {
     phase: fresh ? 'preparing' : 'ready', message: 'Control–Space to start. Press again to finish.', notice: '', recordingStartedAt: null,
     transcript: 'Discuss Dictait with Maya tomorrow.', timing: '0.74 s total · 0.44 s transcription', detectedLanguage: 'en',
-    microphoneAllowed: true, accessibilityAllowed: !fresh, shortcutRegistered: true, launchAtLogin: true, loginNeedsApproval: false,
+    microphoneAllowed: true, accessibilityAllowed: !fresh, shortcutRegistered: true, correctionShortcutRegistered: true, launchAtLogin: true, loginNeedsApproval: false,
     rememberedTerms: termList.length,
     settings: {
       backend: 'whisper', language: 'auto', cleanup: true, autoPaste: true, smartFormatting: true, writingStyle: 'Keep my natural tone and wording.',
       memoryMode: 'notes', learnCorrections: true, appearance: 'system', useContext: true, voiceEdits: true, appTones: true, microphone: 'auto',
-      setupDone: !fresh, autoUpdate: true,
+      setupDone: !fresh, autoUpdate: true, feedbackSounds: true,
       tones: {
         ai: 'Write it as a clear request to an AI assistant: the goal first, then details and constraints. Keep file names, code terms and commands exact.',
         messaging: 'Casual and brief, like a chat message. No greeting or sign-off unless I say one.',
@@ -72,7 +72,7 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
     vocabulary,
     history: [{ text: 'Discuss Dictait with Maya tomorrow.', at: Date.now() - 600_000, app: 'Slack' }],
     download: fresh ? { model: 'speech model', done: 1_120_000_000, total: 3_250_000_000 } : null,
-    version: '0.5.0',
+    version: '0.6.7', correction: null, microphoneName: 'MacBook Air Microphone', micTestActive: false, practiceCompleted: [],
     update: { phase: 'available', version: '0.5.1', notes: 'Faster cleanup and a new island.', progress: 0, error: '', checkedAt: Date.now() - 60_000 }
   }
   let suggestions: Suggestion[] = [
@@ -139,11 +139,36 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
       after(1600, () => emit({ phase: 'ready', message: 'Control–Space to start. Press again to finish.' }))
     },
     copyText: async (text) => { try { await navigator.clipboard.writeText(text) } catch { /* preview only */ } },
-    learnCorrection: async () => 'Correction saved on this Mac. Future cleanup will use it.',
-    addWord: async (word, alias) => {
+    learnCorrection: async () => {
+      emit({ correction: { id: 'demo-correction', original: 'Ask queen to tidy the wording.', corrected: 'Ask Qwen to tidy the wording.' } })
+      return 'Review the correction before saving it.'
+    },
+    previewCorrection: async () => {
+      emit({ correction: { id: 'demo-correction', original: 'Ask queen to tidy the wording.', corrected: 'Ask Qwen to tidy the wording.' } })
+      return { ok: true, feedback: 'Review the correction before saving it.' }
+    },
+    saveCorrection: async () => { emit({ correction: null, settings: { ...state.settings, learnCorrections: true } }); return { ok: true, feedback: 'Correction saved on this Mac.' } },
+    dismissCorrection: () => emit({ correction: null }),
+    startMicTest: async () => {
+      emit({ micTestActive: true })
+      window.clearInterval(levelTimer)
+      levelTimer = window.setInterval(() => listeners.level.forEach((callback) => callback(0.2 + Math.random() * 0.4)), 50)
+      after(15000, () => { if (state.micTestActive) { window.clearInterval(levelTimer); emit({ micTestActive: false }) } })
+      return { ok: true, feedback: 'Speak to check the level. The test stops after 15 seconds.' }
+    },
+    stopMicTest: () => { if (state.micTestActive) { window.clearInterval(levelTimer); emit({ micTestActive: false }) } },
+    addWord: async (word, alias, replaceId) => {
       const clean = word.trim()
       if (!clean) return { ok: false, feedback: 'Type the word the way you want it spelled.' }
-      const existing = vocabulary.find((entry) => entry.word.toLowerCase() === clean.toLowerCase())
+      const target = replaceId ? vocabulary.find((entry) => entry.id === replaceId) : undefined
+      const existing = vocabulary.find((entry) => entry.id !== target?.id && entry.word.toLowerCase() === clean.toLowerCase())
+      if (target) {
+        vocabulary = vocabulary
+          .filter((entry) => entry.id !== existing?.id)
+          .map((entry) => (entry.id === target.id ? { ...entry, word: clean, alias: alias.trim() } : entry))
+        emit({ vocabulary })
+        return { ok: true, feedback: `Updated “${clean}”.` }
+      }
       vocabulary = existing ? vocabulary.map((entry) => (entry === existing ? { ...entry, word: clean, alias: alias.trim() } : entry))
         : [...vocabulary, { id: `v${Date.now()}`, word: clean, alias: alias.trim() }]
       emit({ vocabulary })
@@ -184,9 +209,12 @@ function demoHud(callback: (state: HudState) => void): () => void {
   const pinned = params.get('kind') as HudKind | null
   if (pinned) {
     const step = steps.find(([kind]) => kind === pinned)
+    const copy = pinned === 'copied' ? ['Copied · ready to paste', 'Focus a text box, then ⌘V · ⌃⌥V repeats the last dictation'] : step?.slice(1, 3)
     const timer = window.setTimeout(() => callback({
-      visible: true, kind: pinned, title: step?.[1] ?? 'Needs attention', detail: step?.[2] ?? 'The model worker stopped. Click Retry to reload models.',
-      startedAt: Date.now() - 12_000, screen, live: pinned === 'recording' ? 'so the plan is to ship the preview build on Friday and then' : '', note: '', holding: false, editing: false
+      visible: true, kind: pinned, title: String(copy?.[0] ?? 'Needs attention'), detail: String(copy?.[1] ?? 'The model worker stopped. Click Retry to reload models.'),
+      startedAt: Date.now() - 12_000, screen, live: pinned === 'recording' ? 'so the plan is to ship the preview build on Friday and then' : '', note: '',
+      holding: params.get('mode') === 'hold', holdStartedAt: params.get('mode') === 'pending' ? Date.now() : null, editing: false,
+      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: params.get('quiet') === '1'
     }), 300)
     return () => window.clearTimeout(timer)
   }
@@ -197,7 +225,8 @@ function demoHud(callback: (state: HudState) => void): () => void {
     const [kind, title, detail, duration] = steps[index % steps.length]
     index++
     if (kind) last = kind
-    callback({ visible: kind !== null, kind: kind ?? last, title, detail, startedAt: kind === 'recording' ? Date.now() : null, screen, live: '', note: '', holding: false, editing: false })
+    callback({ visible: kind !== null, kind: kind ?? last, title, detail, startedAt: kind === 'recording' ? Date.now() : null, screen, live: '', note: '', holding: false, holdStartedAt: null, editing: false,
+      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: false })
     timer = window.setTimeout(next, duration)
   }
   timer = window.setTimeout(next, 500)

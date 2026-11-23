@@ -120,6 +120,20 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(normalize_vocabulary("bad"), [])
         self.assertEqual(normalize_vocabulary([None, {}, {"word": "Qwen", "alias": "queen"}]), [{"word": "Qwen", "alias": "queen"}])
 
+    def test_non_latin_hindi_terms_are_preserved(self):
+        self.assertTrue(meaningful("भारत"))
+        self.memory.remember("आज भारत और दिल्ली की बात हुई।", [{"term": "भारत", "kind": "term"}, {"term": "दिल्ली", "kind": "person"}], "hi")
+        words = [entry["word"] for entry in self.memory.vocabulary()]
+        self.assertIn("भारत", words)
+        self.assertIn("दिल्ली", words)
+
+    def test_attach_terms_rejects_hallucinated_existing_terms(self):
+        self.memory.remember("Discuss Dictait.", [{"term": "Dictait", "kind": "project"}])
+        note_id = self.memory.remember("Buy groceries today.", [], "en", save_note=True)
+        self.memory.attach_terms(note_id, [{"term": "Dictait"}], text="Buy groceries today.")
+        linked = self.memory.db.execute("SELECT count(*) FROM note_terms WHERE note_id=?", (note_id,)).fetchone()[0]
+        self.assertEqual(linked, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

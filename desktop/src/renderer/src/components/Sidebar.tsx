@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef } from 'react'
-import { AlertTriangle, AudioLines, BookA, Cpu, Mic, NotebookText, RotateCw, Settings2, Waypoints, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, AudioLines, BookA, Cpu, Mic, NotebookText, RotateCw, Settings2, Waypoints, GraduationCap, type LucideIcon } from 'lucide-react'
 import type { AppState, Phase, Section } from '@shared/types'
 import { clock } from '../lib/format'
 import { gentle, snappy } from '../lib/motion'
@@ -11,7 +11,8 @@ const sections: { id: Section; label: string; icon: LucideIcon; key: string }[] 
   { id: 'notes', label: 'Notes', icon: NotebookText, key: '1' },
   { id: 'graph', label: 'Graph', icon: Waypoints, key: '2' },
   { id: 'vocabulary', label: 'Vocabulary', icon: BookA, key: '3' },
-  { id: 'settings', label: 'Settings', icon: Settings2, key: '4' }
+  { id: 'settings', label: 'Settings', icon: Settings2, key: '4' },
+  { id: 'practice', label: 'Practice', icon: GraduationCap, key: '5' }
 ]
 
 const phaseCopy: Record<Phase, { title: string; tone: 'good' | 'live' | 'busy' | 'warn' }> = {

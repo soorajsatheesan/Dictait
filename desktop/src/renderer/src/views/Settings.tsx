@@ -2,14 +2,15 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Accessibility, AppWindow, AudioLines, Brain, ClipboardCheck, ClipboardPaste, Download, FolderOpen, Keyboard, Languages, Mic, Monitor,
-  Moon, PenLine, Power, RefreshCcw, RotateCw, Sparkles, Sun, TextCursorInput, Wand2, type LucideIcon
+  Moon, PenLine, Power, RefreshCcw, RotateCw, Sparkles, Sun, TextCursorInput, Volume2, Wand2, GraduationCap, type LucideIcon
 } from 'lucide-react'
 import type { AppState, Microphone, Settings, Tones } from '@shared/types'
 import { Keys, Segmented, Switch, useToast } from '../components/ui'
 import { snappy } from '../lib/motion'
 import { api } from '../lib/store'
+import { MicrophoneTest } from '../components/MicrophoneTest'
 
-export function SettingsView({ state }: { state: AppState }) {
+export function SettingsView({ state, onPractice }: { state: AppState; onPractice: () => void }) {
   const toast = useToast()
   const { settings } = state
   const editable = ['ready', 'failed'].includes(state.phase)
@@ -21,7 +22,7 @@ export function SettingsView({ state }: { state: AppState }) {
         <Health state={state} />
 
         <Group title="Dictation">
-          <Row icon={Keyboard} title="Start and finish" detail={state.shortcutRegistered ? 'Tap to start and tap to finish, or hold while you talk and let go.' : 'Another app or macOS is using Control–Space.'}>
+          <Row icon={Keyboard} title="Start and finish" detail={state.shortcutRegistered ? 'Tap to start and tap to finish. Hold for 1.2 seconds for hold-to-talk, then release to finish.' : 'Another app or macOS is using Control–Space.'}>
             {state.shortcutRegistered ? <Keys keys={['⌃', 'Space']} /> : <button type="button" className="btn secondary" onClick={() => api.retryShortcut()}><RotateCw size={13} /> Retry</button>}
           </Row>
           <Row icon={ClipboardPaste} title="Paste last dictation" detail="Puts your latest dictation at the cursor again. Recent ones are in the menu bar too.">
@@ -29,6 +30,12 @@ export function SettingsView({ state }: { state: AppState }) {
           </Row>
           <Row icon={AudioLines} title="Cancel a recording" detail="Throws the audio away. Nothing is transcribed or saved.">
             <Keys keys={['esc']} />
+          </Row>
+          <Row icon={Volume2} title="Recording sounds" detail="Soft cues when recording starts and finishes. Visual feedback is always shown.">
+            <Switch label="Recording sounds" on={settings.feedbackSounds} onChange={(value) => set({ feedbackSounds: value })} />
+          </Row>
+          <Row icon={GraduationCap} title="Try the controls" detail="Practise tap-to-record, hold-to-talk and voice editing inside Dictait.">
+            <button type="button" className="btn secondary" onClick={onPractice}>Open Practice</button>
           </Row>
           <Row icon={ClipboardCheck} title="Paste into the focused app" detail="Otherwise your words wait on the clipboard for ⌘V.">
             <Switch label="Paste automatically" on={settings.autoPaste} onChange={(value) => set({ autoPaste: value })} />
@@ -47,6 +54,7 @@ export function SettingsView({ state }: { state: AppState }) {
               title="Parakeet" detail="Quick English and European languages. No Hindi." />
           </div>
           <MicrophoneRow value={settings.microphone} onChange={(value) => set({ microphone: value })} />
+          <MicrophoneTest state={state} />
           <Row icon={Languages} title="Language" detail="Choosing English skips detection and is a touch faster.">
             <Segmented label="Language" value={settings.language} disabled={!editable} onChange={(value) => set({ language: value })}
               options={[{ value: 'auto', label: 'Detect' }, { value: 'en', label: 'English' }, { value: 'hi', label: 'Hindi', disabled: settings.backend !== 'whisper', hint: 'Whisper only' }]} />
@@ -92,8 +100,9 @@ export function SettingsView({ state }: { state: AppState }) {
             <Choice active={settings.memoryMode === 'terms'} onClick={() => set({ memoryMode: 'terms' })} title="Terms only" detail="Learn names and topics; don’t keep the text." />
             <Choice active={settings.memoryMode === 'off'} onClick={() => set({ memoryMode: 'off' })} title="Off" detail="Nothing new is learned or used." />
           </div>
-          <Row icon={Brain} title="Learn from corrections" detail="Fix a pasted dictation, copy it, then teach Dictait the difference.">
-            <button type="button" className="btn secondary" disabled={!state.transcript} onClick={() => void api.learnCorrection().then((feedback) => toast(feedback))}>Learn from clipboard</button>
+          <Row icon={Brain} title="Learn from corrections" detail={state.correctionShortcutRegistered ? <>Select your corrected dictation and press <Keys keys={['⌃', '⌥', 'L']} small />. Review both versions before saving.</>
+            : 'Control–Option–L is unavailable. Review from clipboard, or retry keyboard shortcuts from the menu bar.'}>
+            <button type="button" className="btn secondary" disabled={!state.transcript || !editable} onClick={() => void api.learnCorrection().then((feedback) => { if (!feedback.startsWith('Review')) toast(feedback) })}>Review from clipboard</button>
             <Switch label="Learn from corrections" on={settings.learnCorrections} onChange={(value) => set({ learnCorrections: value })} />
           </Row>
           <Row icon={FolderOpen} title="Your notes on disk" detail="Plain Markdown with a graph, ready for Obsidian.">
@@ -143,10 +152,11 @@ function UpdateRow({ state }: { state: AppState }) {
 }
 
 function Health({ state }: { state: AppState }) {
+  const autoPasteOff = !state.settings.autoPaste
   const checks = [
-    { label: 'Microphone', ok: state.microphoneAllowed, fix: () => api.requestMicrophone(), icon: Mic },
-    { label: 'Auto-paste', ok: state.accessibilityAllowed || !state.settings.autoPaste, fix: () => api.requestAccessibility(), icon: Accessibility },
-    { label: 'Shortcut', ok: state.shortcutRegistered, fix: () => api.retryShortcut(), icon: Keyboard }
+    { label: 'Microphone', ok: state.microphoneAllowed, muted: false, stateText: 'On', actionLabel: 'Allow…', fix: () => api.requestMicrophone(), icon: Mic },
+    { label: 'Auto-paste', ok: state.accessibilityAllowed || autoPasteOff, muted: autoPasteOff, stateText: autoPasteOff ? 'Off' : 'On', actionLabel: 'Allow…', fix: () => api.requestAccessibility(), icon: Accessibility },
+    { label: 'Shortcut', ok: state.shortcutRegistered, muted: false, stateText: 'On', actionLabel: 'Retry', fix: () => api.retryShortcut(), icon: Keyboard }
   ]
   const failed = state.phase === 'failed'
   const preparing = state.phase === 'preparing'
@@ -166,11 +176,11 @@ function Health({ state }: { state: AppState }) {
         {failed && <button type="button" className="btn primary" onClick={() => api.reloadModels()}><RotateCw size={13} /> Retry models</button>}
       </div>
       <div className="health-checks">
-        {checks.map(({ label, ok, fix, icon: Icon }) => (
-          <div key={label} className={`check ${ok ? 'ok' : 'needed'}`}>
+        {checks.map(({ label, ok, muted, stateText, actionLabel, fix, icon: Icon }) => (
+          <div key={label} className={`check ${ok ? (muted ? '' : 'ok') : 'needed'}`}>
             <Icon size={14} strokeWidth={2} />
             <span>{label}</span>
-            {ok ? <span className="check-state">On</span> : <button type="button" className="check-fix" onClick={fix}>Allow…</button>}
+            {ok ? <span className="check-state">{stateText}</span> : <button type="button" className="check-fix" onClick={fix}>{actionLabel}</button>}
           </div>
         ))}
       </div>
@@ -216,18 +226,25 @@ function Choice({ active, title, detail, tag, onClick, disabled = false }: { act
 /** "Automatic" avoids Bluetooth headset microphones, which drop the headset to low-quality sound. */
 function MicrophoneRow({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const [devices, setDevices] = useState<Microphone[]>([])
-  useEffect(() => { void api.microphones().then(setDevices) }, [])
+  useEffect(() => {
+    let alive = true
+    const refresh = () => { void api.microphones().then((next) => { if (alive) setDevices(next) }) }
+    refresh()
+    navigator.mediaDevices?.addEventListener('devicechange', refresh)
+    return () => { alive = false; navigator.mediaDevices?.removeEventListener('devicechange', refresh) }
+  }, [])
   const current = devices.find((device) => device.default)
+  const alternative = devices.find((device) => device.transport === 'builtin') ?? devices.find((device) => device.transport === 'usb')
   const detail = value === 'auto'
-    ? current?.transport === 'bluetooth' ? `Using the built-in mic, so ${current.name} keeps full sound quality.` : 'Avoids Bluetooth headset mics, which lower audio quality.'
+    ? current?.transport === 'bluetooth' && alternative ? `Uses ${alternative.name}, so ${current.name} keeps full sound quality.` : 'Avoids Bluetooth headset mics when another input is available.'
     : value === 'system' ? `Follows macOS${current ? `: ${current.name}` : ''}.` : 'Always this microphone, when connected.'
   return (
     <Row icon={Mic} title="Microphone" detail={detail}>
-      <select className="select" value={value} onChange={(event) => onChange(event.target.value)} aria-label="Microphone">
+      <select className="select" value={value} onChange={(event) => { api.stopMicTest(); onChange(event.target.value) }} aria-label="Microphone">
         <option value="auto">Automatic</option>
         <option value="system">macOS default</option>
         {devices.length > 0 && <option disabled>──────────</option>}
-        {devices.map((device) => <option key={device.name} value={device.name}>{device.name}{device.transport === 'bluetooth' ? ' (Bluetooth)' : ''}</option>)}
+        {devices.map((device, index) => <option key={`${device.name}-${index}`} value={device.name}>{device.name}{device.transport === 'bluetooth' ? ' (Bluetooth)' : ''}</option>)}
         {!['auto', 'system'].includes(value) && !devices.some((device) => device.name === value) && <option value={value}>{value} (not connected)</option>}
       </select>
     </Row>
@@ -274,16 +291,35 @@ function ToneInput({ value, onSave }: { value: string; onSave: (value: string) =
     onKeyDown={(event) => { if (event.key === 'Enter') (event.target as HTMLInputElement).blur() }} />
 }
 
-/** Writing style saves as you pause typing, and on blur. */
+/** Writing style saves as you pause typing, on blur, and before unmount. */
 function StyleField({ value, onSave }: { value: string; onSave: (value: string) => void }) {
   const [draft, setDraft] = useState(value)
   const [saved, setSaved] = useState(false)
   const timer = useRef<number | undefined>(undefined)
+  const savedTimer = useRef<number | undefined>(undefined)
   const focused = useRef(false)
-  useEffect(() => { if (!focused.current) setDraft(value) }, [value])
+  const latestDraft = useRef(value)
+  const latestValue = useRef(value)
+  const latestSave = useRef(onSave)
+  latestValue.current = value
+  latestSave.current = onSave
+  useEffect(() => {
+    if (!focused.current) { setDraft(value); latestDraft.current = value }
+  }, [value])
+  useEffect(() => () => {
+    window.clearTimeout(timer.current)
+    window.clearTimeout(savedTimer.current)
+    if (latestDraft.current !== latestValue.current) latestSave.current(latestDraft.current)
+  }, [])
   const commit = (next: string) => {
     window.clearTimeout(timer.current)
-    if (next !== value) { onSave(next); setSaved(true); window.setTimeout(() => setSaved(false), 1400) }
+    if (next !== latestValue.current) {
+      latestValue.current = next
+      latestSave.current(next)
+      setSaved(true)
+      window.clearTimeout(savedTimer.current)
+      savedTimer.current = window.setTimeout(() => setSaved(false), 1400)
+    }
   }
   return (
     <div className="style-field">
@@ -300,6 +336,7 @@ function StyleField({ value, onSave }: { value: string; onSave: (value: string) 
         onChange={(event) => {
           const next = event.target.value
           setDraft(next)
+          latestDraft.current = next
           window.clearTimeout(timer.current)
           timer.current = window.setTimeout(() => commit(next), 700)
         }} />

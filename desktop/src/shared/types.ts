@@ -1,8 +1,10 @@
 /** Long dictations are processed in pieces while you speak, so this can be generous. */
 export const MAX_DICTATION_SECONDS = 30 * 60
+/** Deliberate hold-to-talk; shorter presses keep recording until the next tap. */
+export const HOLD_TO_TALK_MS = 1200
 
 export type Phase = 'preparing' | 'ready' | 'requestingMicrophone' | 'recording' | 'transcribing' | 'cleaning' | 'failed'
-export type Section = 'notes' | 'graph' | 'vocabulary' | 'settings'
+export type Section = 'notes' | 'graph' | 'vocabulary' | 'settings' | 'practice'
 export type Appearance = 'system' | 'light' | 'dark'
 export type MemoryMode = 'notes' | 'terms' | 'off'
 export type Backend = 'whisper' | 'parakeet'
@@ -41,6 +43,22 @@ export interface Settings {
   setupDone: boolean
   /** Check GitHub for new releases and offer them. */
   autoUpdate: boolean
+  /** Soft recording start and finish cues. */
+  feedbackSounds: boolean
+}
+
+/** App metadata only; no field contents or remembered paste location. */
+export interface Destination {
+  app: string
+  appName: string
+  icon: string
+  editable: boolean | null
+}
+
+export interface CorrectionDraft {
+  id: string
+  original: string
+  corrected: string
 }
 
 /** A first-run model download in progress. */
@@ -95,6 +113,10 @@ export interface CorrectionExample {
 }
 
 export interface AppState {
+  correction: CorrectionDraft | null
+  microphoneName: string
+  micTestActive: boolean
+  practiceCompleted: ('tap' | 'hold' | 'edit')[]
   phase: Phase
   message: string
   notice: string
@@ -105,6 +127,7 @@ export interface AppState {
   microphoneAllowed: boolean
   accessibilityAllowed: boolean
   shortcutRegistered: boolean
+  correctionShortcutRegistered: boolean
   launchAtLogin: boolean
   loginNeedsApproval: boolean
   rememberedTerms: number
@@ -168,12 +191,17 @@ export interface HudState {
   note: string
   /** The shortcut is being held: letting go finishes. */
   holding: boolean
+  /** Key-down time while choosing hold-to-talk. Null after release. */
+  holdStartedAt: number | null
   /** Rewriting the selected text rather than dictating. */
   editing: boolean
+  destination: Destination | null
+  microphone: string
+  micQuiet: boolean
 }
 
 export type RecorderCommand = 'start' | 'stop' | 'cancel'
-export interface RecorderOptions { device?: string | null }
+export interface RecorderOptions { device?: string | null; monitor?: boolean; requestId?: number }
 
 export interface WordResult {
   ok: boolean
@@ -199,7 +227,12 @@ export interface DictaitAPI {
   reloadModels(): void
   copyText(text: string): Promise<void>
   learnCorrection(): Promise<string>
-  addWord(word: string, alias: string): Promise<WordResult>
+  previewCorrection(): Promise<WordResult>
+  saveCorrection(draft: CorrectionDraft): Promise<WordResult>
+  dismissCorrection(): void
+  startMicTest(): Promise<WordResult>
+  stopMicTest(): void
+  addWord(word: string, alias: string, replaceId?: string): Promise<WordResult>
   removeWord(id: string): Promise<WordResult>
   restoreWord(entry: VocabularyEntry, index: number): Promise<WordResult>
   openFolder(which: 'notes' | 'memory'): void
@@ -212,9 +245,9 @@ export interface DictaitAPI {
   onHud(callback: (state: HudState) => void): () => void
   hudHidden(): void
   onRecorder(callback: (command: RecorderCommand, options?: RecorderOptions) => void): () => void
-  recorderStarted(): void
-  recorderFailed(message: string): void
-  recorderData(audio: ArrayBuffer | null): void
+  recorderStarted(device?: string, requestId?: number): void
+  recorderFailed(message: string, requestId?: number): void
+  recorderData(audio: ArrayBuffer | null, requestId?: number): void
   recorderPiece(audio: ArrayBuffer, index: number): void
   recorderEnded(): void
   recorderLevel(level: number): void

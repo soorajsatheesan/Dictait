@@ -12,6 +12,8 @@ jobs:
           node-version: '22'
       - name: Typecheck desktop app
         run: cd desktop && npm install --no-audit --no-fund && npm run typecheck
+      - name: Check shortcut and delivery regressions
+        run: cd desktop && npm test
       - name: Build desktop app
         run: ./build-macos.sh
       - name: Validate installer and bundle metadata

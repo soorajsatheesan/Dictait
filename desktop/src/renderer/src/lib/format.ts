@@ -22,7 +22,7 @@ export function dayLabel(time: number, now = Date.now()): string {
   if (days === 0) return 'Today'
   if (days === 1) return 'Yesterday'
   const date = new Date(time)
-  if (days < 7) return date.toLocaleDateString(undefined, { weekday: 'long' })
+  if (days > 1 && days < 7) return date.toLocaleDateString(undefined, { weekday: 'long' })
   const sameYear = date.getFullYear() === new Date(now).getFullYear()
   return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) })
 }
@@ -48,7 +48,7 @@ export function languageName(code: string): string {
   try { return new Intl.DisplayNames(undefined, { type: 'language' }).of(code) ?? code } catch { return code }
 }
 
-export function groupByDay(notes: ArchivedNote[]): { label: string; notes: ArchivedNote[] }[] {
+export function groupByDay(notes: ArchivedNote[]): { key: number; label: string; notes: ArchivedNote[] }[] {
   const groups: { label: string; key: number; notes: ArchivedNote[] }[] = []
   for (const note of notes) {
     const key = startOfDay(note.created)

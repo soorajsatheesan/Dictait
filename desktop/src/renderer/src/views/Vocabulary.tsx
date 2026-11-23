@@ -21,10 +21,8 @@ export function VocabularyView({ vocabulary, search }: { vocabulary: VocabularyE
   const submit = async (event?: React.FormEvent) => {
     event?.preventDefault()
     if (!word.trim()) { wordInput.current?.focus(); return }
-    const result = await api.addWord(word, alias)
+    const result = await api.addWord(word, alias, editing?.id)
     if (!result.ok) { setError(result.feedback); return }
-    // Renaming an entry replaces the old spelling.
-    if (editing && editing.word.toLocaleLowerCase() !== word.trim().toLocaleLowerCase()) await api.removeWord(editing.id)
     setWord(''); setAlias(''); setEditing(null); setError('')
     toast(result.feedback)
     wordInput.current?.focus()
@@ -126,7 +124,13 @@ export function VocabularyView({ vocabulary, search }: { vocabulary: VocabularyE
 function Suggestions({ vocabulary }: { vocabulary: VocabularyEntry[] }) {
   const toast = useToast()
   const [items, setItems] = useState<Suggestion[]>([])
-  useEffect(() => { void api.suggestions().then(setItems) }, [vocabulary])
+  useEffect(() => {
+    let alive = true
+    const load = () => { void api.suggestions().then((next) => { if (alive) setItems(next) }) }
+    load()
+    const offArchive = api.onArchiveChanged(load)
+    return () => { alive = false; offArchive() }
+  }, [vocabulary])
   if (!items.length) return null
   const add = async (item: Suggestion) => {
     const result = await api.addWord(item.word, item.alias)

@@ -32,16 +32,28 @@ export class Recorder {
   private chunks: Float32Array[] = []
   private session = 0
 
+  get deviceName(): string { return this.stream?.getAudioTracks()[0]?.label ?? '' }
+
   /** `device` names a microphone to use instead of the system default (matched by label). */
-  async start(device?: string | null): Promise<void> {
+  async start(device?: string | null, monitor = false): Promise<void> {
     this.cancel()
     const session = ++this.session
     let stream: MediaStream
     try {
       const deviceId = device ? await findDevice(device) : undefined
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { deviceId: deviceId ? { exact: deviceId } : undefined, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-      })
+      const base = { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: deviceId ? { exact: deviceId } : undefined, ...base }
+        })
+      } catch (error) {
+        const name = (error as DOMException).name
+        if (deviceId && (name === 'NotFoundError' || name === 'OverconstrainedError')) {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: base })
+        } else {
+          throw error
+        }
+      }
     } catch (error) {
       const name = (error as DOMException).name
       if (name === 'NotAllowedError' || name === 'SecurityError') throw new Error('Microphone access is off. Allow Dictait in System Settings → Privacy & Security → Microphone.')
@@ -51,22 +63,26 @@ export class Recorder {
     if (session !== this.session) { stream.getTracks().forEach((track) => track.stop()); throw new Error('Cancelled.') }
     let context: AudioContext
     try { context = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' }) } catch { context = new AudioContext({ latencyHint: 'interactive' }) }
-    await context.audioWorklet.addModule(new URL('recorder-worklet.js', document.baseURI).href)
+    try { await context.audioWorklet.addModule(new URL('recorder-worklet.js', document.baseURI).href) }
+    catch (error) { stream.getTracks().forEach((track) => track.stop()); void context.close(); throw error }
     if (session !== this.session) { stream.getTracks().forEach((track) => track.stop()); void context.close(); throw new Error('Cancelled.') }
     const source = context.createMediaStreamSource(stream)
     const node = new AudioWorkletNode(context, 'dictait-recorder', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] })
     const mute = context.createGain()
     mute.gain.value = 0
     node.port.onmessage = (event: MessageEvent<{ samples?: Float32Array; rms?: number }>) => {
-      if (!event.data.samples) return
-      this.chunks.push(event.data.samples)
+      if (session !== this.session || !event.data.samples) return
       this.onLevel(levelFromRMS(event.data.rms ?? 0))
+      if (monitor) return // Mic tests retain no samples and never produce transcription pieces.
+      this.chunks.push(event.data.samples)
       this.considerCut(event.data.samples.length, event.data.rms ?? 0, context.sampleRate)
     }
     source.connect(node)
     node.connect(mute).connect(context.destination) // Keeps the graph pulled; silent.
     for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => { if (this.stream === stream) this.onEnded() })
-    if (context.state === 'suspended') await context.resume()
+    try { if (context.state === 'suspended') await context.resume() }
+    catch (error) { stream.getTracks().forEach((track) => track.stop()); node.disconnect(); void context.close(); throw error }
+    if (session !== this.session) { stream.getTracks().forEach((track) => track.stop()); node.disconnect(); void context.close(); throw new Error('Cancelled.') }
     this.stream = stream; this.context = context; this.node = node; this.chunks = []
     this.pieceSamples = 0; this.quietSamples = 0; this.floor = 0; this.pieces = 0
   }
@@ -111,6 +127,7 @@ export class Recorder {
   }
 
   private release(): void {
+    if (this.node) this.node.port.onmessage = null
     this.stream?.getTracks().forEach((track) => track.stop())
     this.node?.disconnect()
     if (this.context && this.context.state !== 'closed') void this.context.close()
@@ -120,9 +137,14 @@ export class Recorder {
 
 async function findDevice(name: string): Promise<string | undefined> {
   try {
-    const wanted = name.toLowerCase()
-    const devices = await navigator.mediaDevices.enumerateDevices()
-    return devices.find((item) => item.kind === 'audioinput' && item.deviceId !== 'default' && item.label.toLowerCase().includes(wanted))?.deviceId
+    const wanted = name.trim().toLowerCase()
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter((item) => item.kind === 'audioinput' && item.deviceId !== 'default')
+    const stripSuffix = (label: string) => label.trim().toLowerCase().replace(/\s*\([^)]*\)\s*$/, '')
+    return (
+      inputs.find((item) => item.label.trim().toLowerCase() === wanted || stripSuffix(item.label) === wanted) ??
+      inputs.find((item) => item.label.trim().toLowerCase().startsWith(wanted)) ??
+      inputs.find((item) => item.label.toLowerCase().includes(wanted))
+    )?.deviceId
   } catch {
     return undefined
   }
@@ -138,15 +160,30 @@ function toWAV(chunks: Float32Array[], rate: number): ArrayBuffer | null {
   return encodeWAV(rate === RATE ? samples : resample(samples, rate, RATE), RATE)
 }
 
-/** Box-filtered decimation; plenty for speech when the device refuses 16 kHz. */
-function resample(input: Float32Array, from: number, to: number): Float32Array {
+/** Box-filtered decimation when downsampling, linear interpolation when upsampling (e.g. 8 kHz Bluetooth HFP). */
+export function resample(input: Float32Array, from: number, to: number): Float32Array {
+  if (input.length === 0 || from <= 0 || to <= 0) return new Float32Array(0)
+  if (from === to) return input
   const ratio = from / to
-  const output = new Float32Array(Math.floor(input.length / ratio))
+  const output = new Float32Array(Math.max(1, Math.round(input.length / ratio)))
+  if (ratio < 1) {
+    // Upsampling: linear interpolation avoids zero-stuffed samples.
+    const last = input.length - 1
+    for (let i = 0; i < output.length; i++) {
+      const pos = i * ratio
+      const idx = Math.min(last, Math.floor(pos))
+      const next = Math.min(last, idx + 1)
+      const frac = pos - idx
+      output[i] = input[idx] * (1 - frac) + input[next] * frac
+    }
+    return output
+  }
   for (let i = 0; i < output.length; i++) {
-    const start = Math.floor(i * ratio), end = Math.min(input.length, Math.floor((i + 1) * ratio))
+    const start = Math.floor(i * ratio)
+    const end = Math.min(input.length, Math.max(start + 1, Math.floor((i + 1) * ratio)))
     let sum = 0
     for (let j = start; j < end; j++) sum += input[j]
-    output[i] = sum / Math.max(1, end - start)
+    output[i] = sum / (end - start)
   }
   return output
 }

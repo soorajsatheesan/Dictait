@@ -1,5 +1,4 @@
 import { app, ipcMain, Menu, nativeTheme, session, shell, type MenuItemConstructorOptions } from 'electron'
-import { uptime } from 'node:os'
 import { join } from 'node:path'
 import type { Appearance, Section, Settings, Tones, VocabularyEntry } from '@shared/types'
 import { readArchive } from './archive'
@@ -7,7 +6,7 @@ import { Coordinator, openPrivacy } from './coordinator'
 import { DesktopWindow } from './desktop'
 import { NativeHelper } from './helper'
 import { RecordingHUD } from './hud'
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { openFolder, paths, SUPPORT } from './paths'
 import { runPreview } from './preview'
@@ -53,21 +52,39 @@ async function checkHotkeys(): Promise<void> {
   app.quit()
 }
 
+function isHudURL(raw: string | undefined): boolean {
+  if (!raw) return false
+  try {
+    const parsed = new URL(raw)
+    if (rendererURL) {
+      const base = new URL(rendererURL)
+      return parsed.origin === base.origin && parsed.pathname.endsWith('/hud.html')
+    }
+    return parsed.protocol === 'file:' && parsed.pathname === join(rendererDir, 'hud.html')
+  } catch {
+    return false
+  }
+}
+
 function launch(): void {
   app.setActivationPolicy('accessory')
   const model = new Coordinator()
   const desktop = new DesktopWindow(model, preload, rendererURL, rendererDir)
   const hud = new RecordingHUD(model, preload, rendererURL, rendererDir)
   const status = new StatusMenu(model, desktop)
+  desktop.onPolicyChanged = () => hud.reapplyWorkspacePolicy()
   model.recorder = hud
   model.ownFocus = () => desktop.focusedTextField()
+  model.ownPractice = () => desktop.practiceFocused()
+  model.onCorrectionRequested = () => desktop.show()
+  model.onNotice = (title, detail) => hud.notify(title, detail)
   applyAppearance(model.stored.appearance)
 
   // Only the indicator may use the microphone, and only while recording.
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
-    callback(permission === 'media' && contents.getURL().includes('hud.html'))
+    callback(permission === 'media' && isHudURL(contents.getURL()))
   })
-  session.defaultSession.setPermissionCheckHandler((contents, permission) => permission === 'media' && Boolean(contents?.getURL().includes('hud.html')))
+  session.defaultSession.setPermissionCheckHandler((contents, permission) => permission === 'media' && isHudURL(contents?.getURL()))
 
   model.on('state', (state) => desktop.send('state', state))
   model.on('level', (level: number) => { if (desktop.isVisible) desktop.send('level', level) })
@@ -95,7 +112,7 @@ function launch(): void {
 
   // Login launches stay in the background; opening the app shows its window.
   const login = app.getLoginItemSettings()
-  const atLogin = login.wasOpenedAtLogin || process.argv.includes('--background') || (app.isPackaged && uptime() < 150)
+  const atLogin = login.wasOpenedAtLogin || process.argv.includes('--background')
   if (!atLogin) desktop.show()
 }
 
@@ -105,15 +122,19 @@ function applyAppearance(appearance: Appearance): void {
 
 /**
  * A copy downloaded in a browser carries macOS's quarantine flag on every file inside it. Once the
- * person has chosen Open Anyway, clear it from the whole bundle, so the speech engine Dictait starts
- * next is not stopped by Gatekeeper and nobody needs Terminal.
+ * person has chosen Open Anyway, clear it from the whole bundle asynchronously, so startup never
+ * blocks and the speech engine Dictait starts next is not stopped by Gatekeeper.
  */
 function clearQuarantine(): void {
   if (!app.isPackaged) return
   const bundle = appBundle()
-  try { execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', bundle], { stdio: 'ignore' }) } catch { return }
-  try { execFileSync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', bundle], { stdio: 'ignore', timeout: 30_000 }) } catch { /* read-only location */ }
+  execFile('/usr/bin/xattr', ['-p', 'com.apple.quarantine', bundle], { timeout: 3000 }, (error) => {
+    if (error) return
+    execFile('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', bundle], { timeout: 30_000 }, () => { /* read-only location */ })
+  })
 }
+
+const PRIVACY_ANCHORS = new Set(['Privacy_Microphone', 'Privacy_Accessibility'])
 
 function registerIPC(model: Coordinator, desktop: DesktopWindow, updater: Updater): void {
   ipcMain.handle('state:get', () => model.state)
@@ -126,11 +147,17 @@ function registerIPC(model: Coordinator, desktop: DesktopWindow, updater: Update
   ipcMain.on('shortcut:retry', () => void model.registerShortcut())
   ipcMain.on('permission:microphone', () => model.requestMicrophone())
   ipcMain.on('permission:accessibility', () => model.requestAccessibility())
-  ipcMain.on('permission:open', (_event, anchor: string) => openPrivacy(String(anchor)))
+  ipcMain.on('permission:open', (_event, anchor: string) => { if (PRIVACY_ANCHORS.has(String(anchor))) openPrivacy(String(anchor)) })
   ipcMain.on('models:reload', () => model.reloadModels())
   ipcMain.handle('clipboard:copy', (_event, text: string) => model.copyText(String(text)))
   ipcMain.handle('correction:learn', () => model.learnCorrectionFromClipboard())
-  ipcMain.handle('vocabulary:add', (_event, word: string, alias: string) => model.addWord(String(word ?? ''), String(alias ?? '')))
+  ipcMain.handle('correction:preview', () => model.previewCorrection())
+  ipcMain.handle('correction:save', (_event, draft) => model.saveCorrection(draft))
+  ipcMain.on('correction:dismiss', () => model.dismissCorrection())
+  ipcMain.handle('microphone:test', () => model.startMicrophoneTest())
+  ipcMain.on('microphone:stop-test', () => model.stopMicrophoneTest())
+  ipcMain.handle('vocabulary:add', (_event, word: string, alias: string, replaceId?: string) =>
+    model.addWord(String(word ?? ''), String(alias ?? ''), typeof replaceId === 'string' ? replaceId : undefined))
   ipcMain.handle('vocabulary:remove', (_event, id: string) => model.removeWord(String(id)))
   ipcMain.handle('vocabulary:restore', (_event, entry: VocabularyEntry, index: number) =>
     model.restoreWord({ id: String(entry.id), word: String(entry.word), alias: String(entry.alias ?? ''), learned: Boolean(entry.learned) }, Number(index) || 0))
@@ -157,6 +184,7 @@ function sanitize(patch: Partial<Settings>): Partial<Settings> {
   pick('appearance', oneOf('system', 'light', 'dark'))
   pick('cleanup', flag); pick('autoPaste', flag); pick('smartFormatting', flag); pick('learnCorrections', flag)
   pick('setupDone', flag); pick('autoUpdate', flag)
+  pick('feedbackSounds', flag)
   pick('useContext', flag); pick('voiceEdits', flag); pick('appTones', flag)
   pick('writingStyle', (value) => typeof value === 'string')
   pick('microphone', (value) => typeof value === 'string' && value.length <= 200)
@@ -190,7 +218,7 @@ function configureMenu(desktop: DesktopWindow): void {
     { role: 'editMenu' },
     {
       label: 'View', submenu: [
-        go('notes', 'Cmd+1'), go('graph', 'Cmd+2'), go('vocabulary', 'Cmd+3'), go('settings', 'Cmd+4'),
+        go('notes', 'Cmd+1'), go('graph', 'Cmd+2'), go('vocabulary', 'Cmd+3'), go('settings', 'Cmd+4'), go('practice', 'Cmd+5'),
         { type: 'separator' },
         ...(app.isPackaged ? [] : [{ role: 'reload' } as const, { role: 'toggleDevTools' } as const, { type: 'separator' } as const]),
         { role: 'togglefullscreen' }

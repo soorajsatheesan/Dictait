@@ -55,7 +55,7 @@ Dictait opens with a short checklist, and each line ticks itself off:
 
 | Step | What happens |
 |---|---|
-| **Microphone** | Allow it once. Dictait only listens while you hold or toggle the shortcut. |
+| **Microphone** | Allow it once. Dictait listens during dictation or when you explicitly start a short mic test. |
 | **Paste where you type** | Turn Dictait on under Accessibility so it can paste at your cursor. Without it, your words wait on the clipboard for ⌘V. |
 | **Voice models** | Downloads Whisper Large v3 Turbo and a small Qwen model (about 3 GB, once), with live progress. After this, Dictait works offline. |
 | **Try it** | Click into any text box, press ⌃ Space, say a sentence, press it again. |
@@ -72,17 +72,21 @@ Dictait checks GitHub for new releases now and then (**Settings → Updates**; y
 
 <p align="center"><img src="docs/images/island.jpg" width="620" alt="The Dictait island under the notch, showing the voice as a ribbon of light and the words as they are spoken"></p>
 
-- **Dictate anywhere.** Tap ⌃ Space to start and again to finish, or hold it while you talk and let go. The island drops from the notch, shows your voice and your words as you speak, then pastes clean, punctuated text at the cursor. If no text box has focus, the text is copied instead.
+- **Dictate anywhere.** Tap ⌃ Space to start and again to finish, or hold for 1.2 seconds to enter hold-to-talk, then let go to finish. The island shows your progress into hold mode. The island drops from the notch, shows your voice and your words as you speak, then pastes clean, punctuated text at the cursor. If no text box has focus, the text is copied instead.
 - **Talk the way you talk.** “Scratch that” removes the sentence you just said. “New line” and “new paragraph” break the text. Self-corrections like “at five, no, at six” keep only what you meant.
 - **Say what you want.** End or start a dictation with “as bullet points”, “number these”, “summarize this”, “format this as an email”, “make this shorter” or “more formal”.
 - **Say “hey” to your note-taker.** Mid-dictation, “hey, make bullet points of that”, “hey, keep it quick” or “hey, put this in a table” applies to what you just said, and the instruction itself is never typed. Right after a paste, “hey, make that shorter” rewrites it in place, unless you’ve edited it since.
 - **Edit by voice.** Select text in any app, press ⌃ Space and say what to change. Dictait rewrites the selection in place.
-- **Lands where you started.** Click somewhere else while Dictait is still working (another app, another box in the same app) and the text still goes to the box and cursor you started in; then you’re put back where you were. If that place isn’t on screen any more (you switched conversations or tabs, or Raycast closed), the text is pasted there when you go back.
+- **Follows your cursor.** Finished text goes into whichever field is focused when transcription completes. Switch apps, threads or text boxes while Dictait is working and it pastes at your current cursor. If no text box is focused, your words stay on the clipboard for ⌘V.
 - **Fits where you’re typing.** Reads the sentence before your cursor (never saved, never in password fields) so names and flow match, and adapts to the app: a clear request in ChatGPT, Codex, Claude or Claude Code, casual in chat, polished in email, literal in code. In a browser, the tab decides.
 - **Learns your words.** Add names and terms in Vocabulary, or correct one once and Dictait offers to remember it.
 - **Long dictations.** Up to 30 minutes. Dictait transcribes in pieces at your natural pauses while you keep talking, so stopping only waits for the last few seconds.
 - **Paste it again.** ⌃ ⌥ V pastes your last dictation; the menu bar keeps the last ten.
-- **Your notes, kept.** Every dictation becomes a searchable note, linked by the people, projects and terms in it. Browse them in **Notes** and **Graph**, or open the folder as an Obsidian vault.
+- **See where it lands.** The island shows your current app and confirms its name after a verified paste. Copied-text instructions stay visible for longer, with both paste shortcuts. Recording controls stay visible alongside live words; start and finish sounds can be switched off in Settings.
+- **Check your microphone.** Settings has a live level test that stops after 15 seconds without retaining audio or sending it for transcription. If no voice comes through during the first six seconds of dictation, the island shows the active mic and a quiet-input tip. Normal pauses never stop a recording.
+- **Review a correction.** Select your corrected dictation and press ⌃ ⌥ L, or choose **Review from clipboard** in Settings. Compare “Heard this” with “You meant this”, adjust the phrase, then confirm to teach future grammar cleanup.
+- **Practise inside Dictait.** Open **Practice** (⌘5) for tap-to-record, hold-to-talk and voice-editing lessons. Practice dictations bypass Notes and memory; the text box clears when you leave.
+- **Your notes, kept.** With Notes & connections enabled, regular dictations become searchable notes, linked by the people, projects and terms in them. Browse them in **Notes** and **Graph**, or open the folder as an Obsidian vault.
 
 <p align="center"><img src="docs/images/notes.jpg" width="880" alt="The Dictait window: notes with their linked terms"></p>
 

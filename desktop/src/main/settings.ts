@@ -16,7 +16,7 @@ const defaults: Stored = {
   backend: 'whisper', language: 'auto', cleanup: true, autoPaste: true, smartFormatting: true,
   writingStyle: 'Keep my natural tone and wording.', memoryMode: 'notes', learnCorrections: true,
   appearance: 'system', useContext: true, voiceEdits: true, appTones: true, microphone: 'auto',
-  setupDone: false, autoUpdate: true,
+  setupDone: false, autoUpdate: true, feedbackSounds: true,
   tones: {
     ai: 'Write it as a clear request to an AI assistant: the goal first, then details and constraints. Keep file names, code terms and commands exact.',
     messaging: 'Casual and brief, like a chat message. No greeting or sign-off unless I say one.',
@@ -52,21 +52,27 @@ function decode(text: string): string {
 export function loadSettings(): Stored {
   try {
     const stored = JSON.parse(readFileSync(file, 'utf8'))
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) throw new SyntaxError('Invalid settings shape')
     // Anyone upgrading from a version without the setup stage has already set Dictait up.
     if (stored.setupDone === undefined) stored.setupDone = true
     return { ...defaults, ...stored, tones: { ...defaults.tones, ...(stored.tones ?? {}) } }
-  } catch {
-    const legacy = legacyPreferences()
-    const migrated = { ...defaults, ...legacy, setupDone: Object.keys(legacy).length > 0 }
-    saveSettings(migrated)
-    return migrated
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') {
+      const legacy = legacyPreferences()
+      const migrated = { ...defaults, ...legacy, setupDone: Object.keys(legacy).length > 0 }
+      saveSettings(migrated)
+      return migrated
+    }
+    // Transient read failure or corrupt JSON: keep defaults in memory without wiping the file.
+    return { ...defaults, setupDone: true, tones: { ...defaults.tones } }
   }
 }
 
 export function saveSettings(value: Stored): void {
   try {
     mkdirSync(SUPPORT, { recursive: true })
-    const temporary = `${file}.tmp`
+    const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
     writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 })
     renameSync(temporary, file)
   } catch {

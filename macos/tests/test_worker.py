@@ -100,6 +100,25 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(events[-1]["text"], "I has 12 apples.")
             self.assertIsNone(events[-1]["warning"])
 
+    def test_reviewed_correction_keeps_changes_beyond_the_first_240_characters(self):
+        engine = FakeEngine()
+        prefix = "Keep the rest of this sentence unchanged. " * 8
+        original = prefix + "Ask queen."
+        corrected = prefix + "Ask Qwen."
+        with tempfile.TemporaryDirectory() as directory:
+            self.run_request(engine, make_wav(directory), examples=[{"original": original, "corrected": corrected}])
+        self.assertEqual(engine.examples[0]["original"], original)
+        self.assertEqual(engine.examples[0]["corrected"], corrected)
+
+    def test_practice_memory_off_never_reads_or_writes_the_memory_store(self):
+        from unittest.mock import Mock
+        engine = FakeEngine()
+        engine.memory = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            events = self.run_request(engine, make_wav(directory), memory="off")
+        self.assertEqual(events[-1]["event"], "result")
+        self.assertEqual(engine.memory.mock_calls, [])
+
     def test_silence_never_reaches_models(self):
         engine = FakeEngine()
         with tempfile.TemporaryDirectory() as directory:
@@ -420,6 +439,33 @@ class HeyInstructionTests(unittest.TestCase):
 
     def test_hey_before_an_instruction_over_a_selection_still_edits(self):
         self.assertTrue(worker.looks_like_instruction("Hey, make this shorter."))
+
+    def test_restatements_do_not_corrupt_normal_short_sentences(self):
+        fix = worker.resolve_restatements
+        for text in [
+            "I saw John. I left.",
+            "I fixed the bug in the app. The app works.",
+            "We shipped the feature today. Shipped it.",
+            "Let's check the code. Good code.",
+        ]:
+            self.assertEqual(fix(text), text, text)
+
+    def test_valid_edit_allows_spoken_heres_icant_numbers_and_hindi(self):
+        self.assertTrue(worker.valid_edit("here's the plan for tomorrow", "Here's the plan for tomorrow."))
+        self.assertTrue(worker.valid_edit("i can't make it to the meeting", "I can't make it to the meeting."))
+        self.assertTrue(worker.valid_edit("Pay 1000 dollars", "Pay 1,000 dollars."))
+        self.assertTrue(worker.valid_edit("Meet at five", "Meet at 5."))
+        self.assertFalse(worker.valid_edit("Meet at five", "Meet at 6."))
+        # Hindi coverage catches dropped words instead of trivially returning 1.0.
+        raw_hi = "आज मौसम बहुत अच्छा है और हम शाम को बाजार जाएंगे और खाना खाएंगे।"
+        self.assertFalse(worker.valid_edit(raw_hi, "आज मौसम।"))
+        self.assertTrue(worker.valid_edit(raw_hi, raw_hi))
+
+    def test_voice_commands_preserve_question_exclamation_and_decimals(self):
+        self.assertEqual(worker.apply_voice_commands("Are you coming? New paragraph. Let me know."), "Are you coming?\n\nLet me know.")
+        self.assertEqual(worker.apply_voice_commands("Watch out! New line. Next step."), "Watch out!\nNext step.")
+        self.assertEqual(worker.apply_voice_commands("Keep this. The version is 3.5. Scratch that."), "Keep this.")
+        self.assertEqual(worker.apply_voice_commands("Keep this. Meet Dr. Smith tomorrow. Scratch that."), "Keep this.")
 
 if __name__ == "__main__":
     unittest.main()

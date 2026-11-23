@@ -12,7 +12,7 @@ const gb = (bytes: number) => `${(bytes / 1e9).toFixed(bytes >= 1e10 ? 0 : 1)} G
  * First run: everything Dictait needs, as a live checklist. Each line turns done on its own as the
  * permission is granted, the models arrive, and the first dictation lands.
  */
-export function SetupView({ state }: { state: AppState }) {
+export function SetupView({ state, onPractice }: { state: AppState; onPractice: () => void }) {
   const firstTranscript = useRef(state.transcript)
   const modelsReady = !['preparing', 'failed'].includes(state.phase)
   const tried = modelsReady && Boolean(state.transcript) && state.transcript !== firstTranscript.current
@@ -32,7 +32,7 @@ export function SetupView({ state }: { state: AppState }) {
         </header>
 
         <ol className="setup-steps">
-          <Step index={1} icon={Mic} done={state.microphoneAllowed} title="Microphone" detail="So Dictait can hear you while you hold the shortcut. Nothing is recorded otherwise.">
+          <Step index={1} icon={Mic} done={state.microphoneAllowed} title="Microphone" detail="So Dictait can hear you while recording. Tap Control–Space to start and again to finish.">
             {!state.microphoneAllowed && <button type="button" className="btn primary" onClick={() => api.requestMicrophone()}>Allow</button>}
           </Step>
           <Step index={2} icon={Accessibility} done={state.accessibilityAllowed} title="Paste where you type" detail="Accessibility lets Dictait paste at your cursor. Turn Dictait on in the list, then come back here.">
@@ -55,6 +55,7 @@ export function SetupView({ state }: { state: AppState }) {
 
         <footer className="setup-foot">
           <button type="button" className="btn ghost" onClick={finish}>Finish later</button>
+          <button type="button" className="btn secondary" disabled={!modelsReady} onClick={() => { finish(); onPractice() }}>Try in Practice</button>
           <button type="button" className="btn primary big" disabled={!modelsReady} onClick={finish}>{tried ? 'Start dictating' : 'Done'}</button>
         </footer>
       </motion.div>

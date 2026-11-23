@@ -6,8 +6,8 @@ import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  MAX_DICTATION_SECONDS, type AppState, type HistoryEntry, type Microphone, type Phase, type RecorderOptions,
-  type Settings, type Suggestion, type Tones, type UpdateStatus, type VocabularyEntry, type WordResult
+  HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, type AppState, type HistoryEntry, type Microphone, type Phase, type RecorderOptions,
+  type CorrectionDraft, type Destination, type Settings, type Suggestion, type Tones, type UpdateStatus, type VocabularyEntry, type WordResult
 } from '@shared/types'
 import { readArchive } from './archive'
 import { NativeHelper, type FocusInfo } from './helper'
@@ -28,13 +28,35 @@ export interface LiveState {
   live: string
   note: string
   holding: boolean
+  holdStartedAt: number | null
   editing: boolean
   appName: string
+  destination: Destination | null
+  deliveredTo: Destination | null
+  microphone: string
+  micQuiet: boolean
 }
 
-/** Holding Control–Space longer than this turns the press into push-to-talk. */
-const HOLD_MS = 350
-const SPACE = 49, KEY_V = 9
+const SPACE = 49, KEY_V = 9, KEY_L = 37
+
+/** Valid 44-byte 16 kHz mono 16-bit PCM WAV with 0 samples, used to finalize an already-chunked session. */
+function emptyWAV(): Buffer {
+  const buffer = Buffer.alloc(44)
+  buffer.write('RIFF', 0, 'ascii')
+  buffer.writeUInt32LE(36, 4)
+  buffer.write('WAVE', 8, 'ascii')
+  buffer.write('fmt ', 12, 'ascii')
+  buffer.writeUInt32LE(16, 16)
+  buffer.writeUInt16LE(1, 20)
+  buffer.writeUInt16LE(1, 22)
+  buffer.writeUInt32LE(16_000, 24)
+  buffer.writeUInt32LE(32_000, 28)
+  buffer.writeUInt16LE(2, 32)
+  buffer.writeUInt16LE(16, 34)
+  buffer.write('data', 36, 'ascii')
+  buffer.writeUInt32LE(0, 40)
+  return buffer
+}
 
 /** Which tone applies in which app, by bundle identifier. */
 const toneApps: Record<keyof Tones, RegExp> = {
@@ -72,11 +94,15 @@ export class Coordinator extends EventEmitter {
   stored: Stored = loadSettings()
   personal: Personalization = loadPersonal()
   state: AppState
-  readonly live: LiveState = { live: '', note: '', holding: false, editing: false, appName: '' }
+  readonly live: LiveState = { live: '', note: '', holding: false, holdStartedAt: null, editing: false, appName: '',
+    destination: null, deliveredTo: null, microphone: '', micQuiet: false }
   recorder: RecorderBridge | null = null
   onToggleRequested: () => void = () => {}
+  onCorrectionRequested: () => void = () => {}
+  onNotice: (title: string, detail: string) => void = () => {}
   /** Answers whether Dictait's own window has a text field in focus, when it is the active app. */
   ownFocus: () => Promise<boolean | null> = async () => null
+  ownPractice: () => Promise<boolean> = async () => false
   readonly helper = new NativeHelper()
   private worker = new ModelWorker()
   private requestID: string | null = null
@@ -86,16 +112,24 @@ export class Coordinator extends EventEmitter {
   private cleanupAvailable = false
   private lastToggle = 0
   private recordingToken = 0
+  private deliveryToken = 0
   /** The worker session for the current recording; long dictations send pieces under it. */
   private session: string | null = null
   private pieces = 0
   private pieceFiles = new Set<string>()
-  /** Where the user was when recording began: context, selection and app. */
+  /** Recording-time context, selection and tone; delivery always uses the current focus. */
   private target: FocusInfo | null = null
+  private targetReady: Promise<void> = Promise.resolve()
+  private recorderStarting: Promise<void> = Promise.resolve()
   private pressedAt = 0
   private pressStarted = false
   private holdTimer: NodeJS.Timeout | null = null
   private bluetoothTipShown = false
+  private practicing = false
+  private audibleFrames = 0
+  private micTestTimer: NodeJS.Timeout | null = null
+  private micTestToken = 0
+  private recordingWasHold = false
   /** The last dictation pasted where it started, for spoken follow-ups. */
   private lastPasted: { text: string; at: number } | null = null
 
@@ -104,23 +138,30 @@ export class Coordinator extends EventEmitter {
     this.state = {
       phase: 'preparing', message: 'Loading your local models…', notice: '', recordingStartedAt: null,
       transcript: '', timing: '', detectedLanguage: this.stored.detectedLanguage,
-      microphoneAllowed: false, accessibilityAllowed: false, shortcutRegistered: false,
+      microphoneAllowed: false, accessibilityAllowed: false, shortcutRegistered: false, correctionShortcutRegistered: false,
       launchAtLogin: false, loginNeedsApproval: false, rememberedTerms: 0,
       settings: this.settings, vocabulary: this.personal.vocabulary, history: [], download: null, version: app.getVersion(),
-      update: { phase: 'idle', version: '', notes: '', progress: 0, error: '', checkedAt: null }
+      update: { phase: 'idle', version: '', notes: '', progress: 0, error: '', checkedAt: null },
+      correction: null, microphoneName: '', micTestActive: false, practiceCompleted: []
     }
   }
 
   get settings(): Settings {
     const { backend, language, cleanup, autoPaste, smartFormatting, writingStyle, memoryMode, learnCorrections, appearance,
-      useContext, voiceEdits, appTones, tones, microphone, setupDone, autoUpdate } = this.stored
+      useContext, voiceEdits, appTones, tones, microphone, setupDone, autoUpdate, feedbackSounds } = this.stored
     return { backend, language, cleanup, autoPaste, smartFormatting, writingStyle, memoryMode, learnCorrections, appearance,
-      useContext, voiceEdits, appTones, tones: { ...tones }, microphone, setupDone, autoUpdate }
+      useContext, voiceEdits, appTones, tones: { ...tones }, microphone, setupDone, autoUpdate, feedbackSounds }
   }
 
   start(): void {
-    this.helper.on('hotkey', (name: string, down: boolean) => this.hotkey(name, down))
-    this.helper.on('delivered', (text: string, pasted: boolean) => this.deliveredLater(text, pasted))
+    this.helper.on('hotkey', (name: string, down: boolean, focus: FocusInfo | null, at: number) => this.hotkey(name, down, focus, at))
+    this.helper.on('disconnected', () => {
+      this.pressedAt = 0
+      this.pressStarted = false
+      if (this.holdTimer) clearTimeout(this.holdTimer)
+      this.setLive({ holding: false, holdStartedAt: null })
+    })
+    this.helper.on('hotkeys-registered', (registered: Record<string, boolean>) => this.applyHotkeyStatus(registered))
     this.helper.start()
     void this.registerShortcut()
     this.refreshPermissions()
@@ -131,6 +172,11 @@ export class Coordinator extends EventEmitter {
     }
     this.worker.onEvent = (event) => this.handle(event)
     this.reloadModels()
+  }
+
+  /** Surface a short HUD notification from non-window triggers (tray or failed shortcut). */
+  notify(title: string, detail: string): void {
+    this.onNotice(title, detail)
   }
 
   /** The updater reports here, so the window and the menu show the same status. */
@@ -148,12 +194,19 @@ export class Coordinator extends EventEmitter {
     this.emit('live')
   }
 
+  setDestination(destination: Destination | null): void {
+    const previous = this.live.destination
+    if (previous?.app === destination?.app && previous?.appName === destination?.appName && previous?.editable === destination?.editable && previous?.icon === destination?.icon) return
+    this.setLive({ destination })
+  }
+
   private store(patch: Partial<Stored>): void {
     Object.assign(this.stored, patch)
     saveSettings(this.stored)
   }
 
   setPhase(phase: Phase, message: string): void {
+    if (phase !== 'recording' && globalShortcut.isRegistered('Escape')) globalShortcut.unregister('Escape')
     this.state.phase = phase
     this.state.message = message
     this.writeDiagnostics()
@@ -167,7 +220,8 @@ export class Coordinator extends EventEmitter {
       accessibility_allowed: this.state.accessibilityAllowed, backend: this.stored.backend, cleanup_ready: this.cleanupAvailable,
       launch_at_login: this.state.launchAtLogin, login_needs_approval: this.state.loginNeedsApproval,
       memory_mode: this.stored.memoryMode, microphone_allowed: this.state.microphoneAllowed, phase: this.state.phase,
-      remembered_terms: this.state.rememberedTerms, shortcut_registered: this.state.shortcutRegistered
+      remembered_terms: this.state.rememberedTerms, shortcut_registered: this.state.shortcutRegistered,
+      correction_shortcut_registered: this.state.correctionShortcutRegistered, microphone_test_active: this.state.micTestActive
     }
     try {
       mkdirSync(SUPPORT, { recursive: true })
@@ -179,51 +233,64 @@ export class Coordinator extends EventEmitter {
 
   /** Control–Space (tap or hold) and Control–Option–V, through the native helper; Electron as a fallback. */
   async registerShortcut(): Promise<void> {
-    if (globalShortcut.isRegistered('Control+Space')) globalShortcut.unregister('Control+Space')
+    for (const accelerator of ['Control+Space', 'Control+Alt+V', 'Control+Alt+L']) {
+      if (globalShortcut.isRegistered(accelerator)) globalShortcut.unregister(accelerator)
+    }
     const registered = await this.helper.registerHotkeys([
       { name: 'dictate', code: SPACE, modifiers: ['control'] },
-      { name: 'pasteLast', code: KEY_V, modifiers: ['control', 'option'] }
+      { name: 'pasteLast', code: KEY_V, modifiers: ['control', 'option'] },
+      { name: 'learnCorrection', code: KEY_L, modifiers: ['control', 'option'] }
     ])
-    let ok = registered.dictate === true
-    if (!ok && !('dictate' in registered)) {
-      // No helper: tapping still works, holding does not.
-      ok = globalShortcut.register('Control+Space', () => this.toggleRecording())
-      if (!globalShortcut.isRegistered('Control+Alt+V')) globalShortcut.register('Control+Alt+V', () => void this.pasteLast())
-    }
+    // If the native helper is unavailable (empty reply) or missed a shortcut, register Electron fallbacks.
+    if (!('dictate' in registered)) globalShortcut.register('Control+Space', () => this.toggleRecording())
+    if (!registered.pasteLast && !('pasteLast' in registered)) globalShortcut.register('Control+Alt+V', () => void this.pasteLast())
+    if (!registered.learnCorrection && !('learnCorrection' in registered)) globalShortcut.register('Control+Alt+L', () => void this.previewCorrection(null, true))
+    this.applyHotkeyStatus(registered)
+  }
+
+  private applyHotkeyStatus(registered: Record<string, boolean>): void {
+    const ok = registered.dictate === true || globalShortcut.isRegistered('Control+Space')
     let notice = this.state.notice
     if (!ok) notice = 'Control–Space is in use. In Keyboard → Keyboard Shortcuts → Input Sources, disable or change that shortcut, then click Retry shortcut.'
     else if (notice.startsWith('Control–Space is in use')) notice = ''
-    this.update({ shortcutRegistered: ok, notice })
+    this.update({ shortcutRegistered: ok, notice, correctionShortcutRegistered: registered.learnCorrection === true || globalShortcut.isRegistered('Control+Alt+L') })
     this.writeDiagnostics()
   }
 
   /** Tap to start, tap to finish; or hold while talking and let go to finish. */
-  private hotkey(name: string, down: boolean): void {
+  private hotkey(name: string, down: boolean, focus: FocusInfo | null = null, at = Date.now()): void {
     if (name === 'pasteLast') { if (down) void this.pasteLast(); return }
+    if (name === 'learnCorrection') { if (down) void this.previewCorrection(focus, true); return }
     if (name !== 'dictate') return
     if (down) {
-      this.pressedAt = Date.now()
+      // Ignore key auto-repeat until release; recover if a missed key-up left pressedAt stale while idle.
+      if (this.pressedAt && !(this.state.phase === 'ready' && at - this.pressedAt > 15_000)) return
+      this.pressedAt = at
       this.pressStarted = false
       this.onToggleRequested()
       if (this.state.phase === 'recording') { void this.stopRecording(); return }
       if (this.state.phase !== 'ready') return
       this.pressStarted = true
-      this.toggleRecording(true)
+      this.toggleRecording(true, focus)
+      this.setLive({ holdStartedAt: this.pressedAt })
       if (this.holdTimer) clearTimeout(this.holdTimer)
       this.holdTimer = setTimeout(() => {
-        if (this.pressStarted && this.state.phase === 'recording') this.setLive({ holding: true })
-      }, HOLD_MS)
+        if (this.pressStarted && this.state.phase === 'recording') { this.recordingWasHold = true; this.setLive({ holding: true }) }
+      }, Math.max(0, HOLD_TO_TALK_MS - (Date.now() - this.pressedAt)))
       return
     }
     if (this.holdTimer) clearTimeout(this.holdTimer)
-    const held = Date.now() - this.pressedAt >= HOLD_MS
+    const held = this.pressedAt > 0 && at - this.pressedAt >= HOLD_TO_TALK_MS
+    if (this.pressStarted && held) this.recordingWasHold = true
+    this.pressedAt = 0
     if (this.pressStarted && held && this.state.phase === 'recording') void this.stopRecording()
     this.pressStarted = false
-    if (this.live.holding) this.setLive({ holding: false })
+    this.setLive({ holding: false, holdStartedAt: null })
   }
 
   reloadModels(): void {
     if (['recording', 'transcribing', 'cleaning', 'requestingMicrophone'].includes(this.state.phase)) return
+    this.deliveryToken++
     this.clearWatchdog()
     this.setPhase('preparing', 'Preparing local models. The first download can take a few minutes.')
     try {
@@ -234,7 +301,7 @@ export class Coordinator extends EventEmitter {
   }
 
   /** From the menu, the window or the shortcut. `fromHotkey` skips the repeat guard (the helper debounces). */
-  toggleRecording(fromHotkey = false): void {
+  toggleRecording(fromHotkey = false, focus: FocusInfo | null = null): void {
     // Key auto-repeat and double clicks must not start and stop in the same breath.
     const now = Date.now()
     if (!fromHotkey && now - this.lastToggle < 250) return
@@ -250,11 +317,13 @@ export class Coordinator extends EventEmitter {
       this.setPhase('requestingMicrophone', 'Choose Allow in the microphone prompt, then speak.')
       void systemPreferences.askForMediaAccess('microphone').then((granted) => {
         this.update({ microphoneAllowed: granted })
-        if (granted) void this.beginRecording()
+        if (granted) void this.beginRecording(focus)
         else this.setPhase('ready', 'Enable Dictait in System Settings → Privacy & Security → Microphone.')
+      }).catch(() => {
+        this.setPhase('ready', 'Could not request microphone permission. Allow Dictait in Privacy & Security → Microphone.')
       })
     } else if (status === 'granted') {
-      void this.beginRecording()
+      void this.beginRecording(focus)
     } else {
       this.setPhase('ready', 'Enable Dictait in System Settings → Privacy & Security → Microphone.')
       this.requestMicrophone()
@@ -263,23 +332,34 @@ export class Coordinator extends EventEmitter {
 
   // MARK: Recording
 
-  private async beginRecording(): Promise<void> {
+  private async beginRecording(captured: FocusInfo | null = null): Promise<void> {
+    this.stopMicrophoneTest()
     const token = ++this.recordingToken
     const startedAt = Date.now()
     this.session = randomUUID()
     this.pieces = 0
     this.target = null
-    this.setLive({ live: '', note: '', holding: false, editing: false, appName: '' })
+    this.practicing = false
+    this.audibleFrames = 0
+    this.recordingWasHold = false
+    // Capture before showing the panel. Native shortcut events already carry their snapshot.
+    const focus = captured ? Promise.resolve(captured) : this.helper.focus()
+    this.targetReady = this.inspectTarget(focus, token)
+    this.setLive({ live: '', note: '', holding: false, holdStartedAt: null, editing: false, appName: '',
+      deliveredTo: null, microphone: '', micQuiet: false })
     this.state.recordingStartedAt = startedAt
     this.setPhase('recording', 'Control–Space to finish. Escape to cancel.')
     globalShortcut.register('Escape', () => this.cancelRecording())
-    playSound('Tink')
+    if (this.stored.feedbackSounds) playSound('Tink')
     // Look at where the user is while the microphone opens; neither waits for the other.
-    const looking = this.inspectTarget()
     try {
       if (!this.recorder) throw new Error('The recorder is not ready yet.')
-      const device = await this.chooseMicrophone()
-      await this.recorder.start({ device })
+      this.recorderStarting = (async () => {
+        const device = await this.chooseMicrophone()
+        if (token !== this.recordingToken) return
+        await this.recorder!.start({ device })
+      })()
+      await this.recorderStarting
     } catch (error) {
       if (token !== this.recordingToken || this.state.phase !== 'recording') return
       this.endRecordingSession()
@@ -287,22 +367,20 @@ export class Coordinator extends EventEmitter {
       shell.beep()
       return
     }
-    await looking
+    await this.targetReady
     if (token !== this.recordingToken || this.state.phase !== 'recording') return
     this.ticker = setInterval(() => {
+      if (Date.now() - startedAt >= 6000 && this.audibleFrames < 3 && !this.live.micQuiet) this.setLive({ micQuiet: true })
       if (Date.now() - startedAt >= MAX_DICTATION_SECONDS * 1000) void this.stopRecording()
     }, 250)
   }
 
   /** Context before the cursor, the selection (for voice edits) and the app (for tone). */
-  private async inspectTarget(): Promise<void> {
-    const own = await this.ownFocus()
-    if (own !== null) this.helper.forget()
-    // The helper remembers this text field: the words go back here even if the user clicks away.
-    const target = own !== null
-      ? { app: 'org.dictait.mac', appName: 'Dictait', editable: own, before: '', selected: '', window: '' }
-      : await this.helper.focus(true)
-    if (!target || this.state.phase !== 'recording') return
+  private async inspectTarget(focus: Promise<FocusInfo | null>, token: number): Promise<void> {
+    const [target, practicing] = await Promise.all([focus, this.ownPractice()])
+    if (token !== this.recordingToken) return
+    this.practicing = practicing
+    if (!target || token !== this.recordingToken) return
     this.target = target
     const editing = this.stored.voiceEdits && target.editable === true && !target.secure && target.selected.trim().length > 0
     this.setLive({ editing, appName: target.appName })
@@ -334,6 +412,60 @@ export class Coordinator extends EventEmitter {
     return (await this.helper.inputs()).filter((device) => device.transport !== 'virtual' || device.default)
   }
 
+  setMicrophoneDevice(name: string): void {
+    const microphone = name.slice(0, 200) || 'macOS default microphone'
+    this.update({ microphoneName: microphone })
+    this.setLive({ microphone })
+  }
+
+  acceptLevel(level: number): void {
+    const value = Math.max(0, Math.min(1, level))
+    if (this.state.phase === 'recording' && value >= 0.15) {
+      this.audibleFrames++
+      if (this.audibleFrames >= 3 && this.live.micQuiet) this.setLive({ micQuiet: false })
+    }
+    this.emit('level', value)
+  }
+
+  /** A short, level-only check: the recorder never buffers or transcribes test audio. */
+  async startMicrophoneTest(): Promise<WordResult> {
+    if (this.state.phase !== 'ready' || this.state.micTestActive || !this.recorder) return { ok: false, feedback: 'Finish your current dictation before testing the microphone.' }
+    if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
+      this.requestMicrophone()
+      return { ok: false, feedback: 'Allow microphone access, then try the mic test again.' }
+    }
+    const token = ++this.micTestToken
+    this.update({ micTestActive: true })
+    this.writeDiagnostics()
+    try {
+      this.recorderStarting = (async () => {
+        const device = await this.chooseMicrophone()
+        if (token !== this.micTestToken) return
+        await this.recorder!.start({ device, monitor: true })
+      })()
+      await this.recorderStarting
+      if (token === this.micTestToken) {
+        this.micTestTimer = setTimeout(() => this.stopMicrophoneTest(), 15_000)
+      }
+      return { ok: token === this.micTestToken, feedback: token === this.micTestToken ? 'Speak to check the level. The test stops after 15 seconds.' : 'Microphone test stopped.' }
+    } catch (error) {
+      if (token !== this.micTestToken) return { ok: false, feedback: 'Microphone test stopped.' }
+      this.stopMicrophoneTest()
+      return { ok: false, feedback: (error as Error).message }
+    }
+  }
+
+  stopMicrophoneTest(): void {
+    if (!this.state.micTestActive) return
+    this.micTestToken++
+    if (this.micTestTimer) clearTimeout(this.micTestTimer)
+    this.micTestTimer = null
+    this.recorder?.cancel()
+    this.update({ micTestActive: false })
+    this.writeDiagnostics()
+    this.emit('level', 0)
+  }
+
   private endRecordingSession(): void {
     if (this.ticker) clearInterval(this.ticker)
     this.ticker = null
@@ -341,7 +473,7 @@ export class Coordinator extends EventEmitter {
     if (globalShortcut.isRegistered('Escape')) globalShortcut.unregister('Escape')
     this.state.recordingStartedAt = null
     this.pressStarted = false
-    if (this.live.holding) this.setLive({ holding: false })
+    this.setLive({ holding: false, holdStartedAt: null, micQuiet: false })
     this.emit('level', 0)
   }
 
@@ -351,6 +483,7 @@ export class Coordinator extends EventEmitter {
     this.endRecordingSession()
     this.recorder?.cancel()
     this.discardSession()
+    this.deletePendingAudio()
     this.setPhase('ready', 'Recording cancelled. Control–Space to try again.')
   }
 
@@ -384,19 +517,24 @@ export class Coordinator extends EventEmitter {
     return {
       language, cleanup: cleanup && this.cleanupAvailable,
       vocabulary: this.personal.vocabulary.map(({ word, alias }) => ({ word, alias })),
-      memory: memoryMode, smart_formatting: smartFormatting, writing_style: style,
+      memory: this.practicing ? 'off' : memoryMode, smart_formatting: smartFormatting, writing_style: style,
       examples: learnCorrections ? this.personal.examples.map(({ original, corrected }) => ({ original, corrected })) : [],
       // Text before the cursor never leaves this Mac and is never saved.
       context: useContext && target?.editable && !target.secure ? target.before.slice(-500) : '',
       selection: this.live.editing && target ? target.selected.slice(0, 6000) : '',
       app_kind: kind,
       // Only for "hey, make that shorter"; never saved.
-      previous_output: last.slice(0, 6000)
+      previous_output: this.practicing ? '' : last.slice(0, 6000)
     }
   }
 
   /** The input device vanished mid-recording. */
   microphoneEnded(): void {
+    if (this.state.micTestActive) {
+      this.stopMicrophoneTest()
+      this.update({ notice: 'The microphone disconnected. Choose another input and test again.' })
+      return
+    }
     if (this.state.phase !== 'recording') return
     this.cancelRecording()
     this.update({ notice: 'The microphone disconnected. Check your input device and try again.' })
@@ -404,22 +542,32 @@ export class Coordinator extends EventEmitter {
 
   private async stopRecording(): Promise<void> {
     if (this.state.phase !== 'recording') return
-    this.recordingToken++
     this.endRecordingSession()
     this.setPhase('transcribing', this.live.editing ? 'Understanding your instruction…' : 'Turning speech into text on this Mac…')
+    // A quick second tap can arrive while the microphone or focus snapshot is opening.
+    try { await this.recorderStarting } catch { /* stop reports no audio below */ }
+    await this.targetReady
+    this.recordingToken++
     let audio: Buffer | null = null
     try { audio = (await this.recorder?.stop()) ?? null } catch { audio = null }
+    if (this.stored.feedbackSounds) playSound('Pop')
     // Pieces cut during the stop flush have arrived by now; IPC keeps its order.
     const id = this.session ?? randomUUID(), pieces = this.pieces
     this.session = null
     this.pieces = 0
+    // If the final tail failed/timed out after earlier pieces already streamed, still finalize those pieces!
+    if (!audio && pieces > 0) {
+      audio = emptyWAV()
+    }
     if (!audio || (audio.length <= 44 && !pieces)) {
-      if (pieces) { try { this.worker.send({ command: 'discard', id }) } catch { /* worker gone */ } }
+      this.deletePendingAudio()
       this.setPhase('ready', 'No audio recorded. Try again.')
       return
     }
     const file = join(tmpdir(), `dictait-${randomUUID()}.wav`)
     try { writeFileSync(file, audio, { mode: 0o600 }) } catch (error) {
+      if (pieces) { try { this.worker.send({ command: 'discard', id }) } catch { /* worker gone */ } }
+      this.deletePendingAudio()
       this.setPhase('failed', `Could not save the recording: ${(error as Error).message}`)
       return
     }
@@ -475,7 +623,6 @@ export class Coordinator extends EventEmitter {
         this.clearWatchdog()
         this.requestID = null
         this.deletePendingAudio()
-        this.pieceFiles.clear()
         const text = typeof event.text === 'string' ? event.text : ''
         const edit = event.mode === 'edit'
         const warning = typeof event.warning === 'string' ? event.warning : ''
@@ -495,23 +642,32 @@ export class Coordinator extends EventEmitter {
           timing: `${total.toFixed(2)} s total · ${stt.toFixed(2)} s transcription`,
           notice: warning
         })
-        const own = this.target?.app === 'org.dictait.mac'
-        void (own ? this.deliver(text) : this.deliverBack(text)).then((outcome) => {
+        if (this.practicing) {
+          const lesson: AppState['practiceCompleted'][number] = edit ? 'edit' : this.recordingWasHold ? 'hold' : 'tap'
+          this.update({ practiceCompleted: [...new Set([...this.state.practiceCompleted, lesson])] })
+        }
+        const delivery = ++this.deliveryToken
+        void this.deliver(text).then((outcome) => {
+          if (delivery !== this.deliveryToken || this.state.phase === 'failed') return
           if (this.stored.autoPaste && !this.state.accessibilityAllowed) {
             this.update({ notice: 'Enable Dictait in Privacy & Security → Accessibility to paste automatically. Your text is on the clipboard.' })
           }
           const done = edit ? 'Replaced.' : followed ? `Pasted, following your instruction${followed > 1 ? 's' : ''}.` : 'Pasted.'
           this.setPhase('ready', outcome === 'pasted' ? `${done} Control–Space to dictate again.`
-            : outcome === 'waiting' ? 'Copied. You moved away from where you started, so it will be pasted there when you go back.'
-              : outcome === 'no-target' ? 'Copied. No text box was in focus, so press Command–V where you want it.'
-                : outcome === 'gone' ? 'Copied. The text box you started in is gone, so press Command–V where you want it.'
-                  : 'Copied. Press Command–V to paste.')
+            : outcome === 'no-target' ? 'Copied. No text box is focused, so press Command–V where you want it.'
+              : 'Copied. Press Command–V to paste.')
+          this.emit('archive')
+        }).catch(async () => {
+          if (delivery !== this.deliveryToken || this.state.phase === 'failed') return
+          try { await this.copyText(text) } catch { /* clipboard unavailable */ }
+          this.setPhase('ready', 'Copied. Press Command–V to paste.')
           this.emit('archive')
         })
         break
       }
       case 'error':
         if (typeof event.id === 'string' && event.id !== this.requestID) return
+        this.deliveryToken++
         this.clearWatchdog()
         this.requestID = null
         if (this.state.phase === 'recording') { this.recordingToken++; this.endRecordingSession(); this.recorder?.cancel(); this.discardSession() }
@@ -539,58 +695,77 @@ export class Coordinator extends EventEmitter {
     if (text) await clipboard.writeText(text)
   }
 
-  async deliver(text: string): Promise<'pasted' | 'copied' | 'no-target'> {
-    // The clipboard must hold the text before Command–V reaches the focused app.
-    await this.copyText(text)
-    if (!this.stored.autoPaste) return 'copied'
-    const trusted = systemPreferences.isTrustedAccessibilityClient(false)
-    this.update({ accessibilityAllowed: trusted })
-    if (!trusted) return 'copied'
-    // Nothing to type into: leave the words on the clipboard instead of pasting into thin air.
-    if ((await this.focusTarget()) === 'none') return 'no-target'
-    return (await this.helper.paste()) ? 'pasted' : 'copied'
-  }
-
-  /**
-   * Pastes where the dictation started, even if the user has clicked somewhere else since:
-   * Dictait goes back to that text field, pastes, and returns them. Without a remembered field
-   * (none had focus at the start), it pastes wherever the cursor is now.
-   */
-  private async deliverBack(text: string): Promise<'pasted' | 'copied' | 'no-target' | 'gone' | 'waiting'> {
+  async deliver(text: string, explicit = false): Promise<'pasted' | 'copied' | 'no-target'> {
     this.lastPasted = null
-    await this.copyText(text)
-    if (!this.stored.autoPaste) return 'copied'
+    this.setLive({ deliveredTo: null })
+    if (!this.stored.autoPaste && !explicit) {
+      await this.copyText(text)
+      return 'copied'
+    }
     const trusted = systemPreferences.isTrustedAccessibilityClient(false)
     this.update({ accessibilityAllowed: trusted })
-    if (!trusted) return 'copied'
+    if (!trusted) {
+      await this.copyText(text)
+      return 'copied'
+    }
+    // Nothing to type into: leave the words on the clipboard instead of pasting into thin air.
+    if ((await this.focusTarget()) === 'none') {
+      await this.copyText(text)
+      return 'no-target'
+    }
+    // Let the native helper snapshot the clipboard, write `text`, paste, and restore the user's
+    // prior clipboard after verified delivery. If delivery fails, fall back to keeping it copied.
     const outcome = await this.helper.deliver(text)
-    if (outcome === 'no-anchor') return this.deliver(text)
-    if (outcome === 'pasted') this.lastPasted = { text, at: Date.now() }
-    return outcome === 'pasted' || outcome === 'gone' || outcome === 'waiting' || outcome === 'no-target' ? outcome : 'copied'
+    if (outcome === 'pasted') {
+      this.lastPasted = { text, at: Date.now() }
+      this.setLive({ deliveredTo: this.helper.lastDeliveryDestination ?? null })
+      return 'pasted'
+    }
+    await this.copyText(text)
+    return outcome === 'no-target' ? 'no-target' : 'copied'
   }
 
-  /** A dictation that waited for the user to go back to where it started has been pasted. */
-  private deliveredLater(text: string, pasted: boolean): void {
-    if (!pasted) return
-    this.lastPasted = { text, at: Date.now() }
-    if (this.state.phase === 'ready') this.setPhase('ready', 'Pasted where you started. Control–Space to dictate again.')
+  private deliveryStale(token: number): boolean {
+    return token !== this.deliveryToken || this.state.phase === 'failed'
   }
 
   /** "Hey, make that shorter": the last dictation, rewritten in place if it is untouched. */
   private async followUp(text: string, warning: string): Promise<void> {
+    const delivery = ++this.deliveryToken
+    this.setLive({ deliveredTo: null })
     const last = this.lastPasted
     if (!text || !last) {
       this.setPhase('ready', warning || 'Nothing recent to apply that to. Dictate the text and the instruction together.')
       return
     }
-    await this.copyText(text)
     this.update({ transcript: text, notice: '', history: [{ text: text.trim(), at: Date.now(), app: this.target?.appName ?? '' }, ...this.state.history].slice(0, 10) })
-    const outcome = systemPreferences.isTrustedAccessibilityClient(false) ? await this.helper.replaceLast(last.text, text) : 'untrusted'
-    if (outcome === 'replaced') this.lastPasted = { text, at: Date.now() }
-    this.setPhase('ready', outcome === 'replaced' ? 'Updated your last dictation. Control–Space to dictate again.'
-      : outcome === 'changed' ? 'That text has changed since, so the new version is on the clipboard. Press Command–V to use it.'
-        : 'Copied the new version. Press Command–V where you want it.')
-    this.emit('archive')
+    try {
+      const outcome = this.stored.autoPaste && systemPreferences.isTrustedAccessibilityClient(false)
+        ? await this.helper.replaceLast(last.text, text) : 'untrusted'
+      if (this.deliveryStale(delivery)) return
+      if (outcome === 'replaced') {
+        this.lastPasted = { text, at: Date.now() }
+        this.setLive({ deliveredTo: this.helper.lastDeliveryDestination ?? null })
+      }
+      if (outcome === 'gone') {
+        const delivered = await this.deliver(text)
+        if (this.deliveryStale(delivery)) return
+        this.setPhase('ready', delivered === 'pasted' ? 'Pasted at your current cursor. Control–Space to dictate again.'
+          : 'Copied the new version. Press Command–V where you want it.')
+        this.emit('archive')
+        return
+      }
+      if (outcome !== 'replaced') await this.copyText(text)
+      this.setPhase('ready', outcome === 'replaced' ? 'Updated your last dictation. Control–Space to dictate again.'
+        : outcome === 'changed' ? 'That text has changed since, so the new version is on the clipboard. Press Command–V to use it.'
+          : 'Copied the new version. Press Command–V where you want it.')
+      this.emit('archive')
+    } catch {
+      if (this.deliveryStale(delivery)) return
+      try { await this.copyText(text) } catch { /* clipboard unavailable */ }
+      this.setPhase('ready', 'Copied the new version. Press Command–V where you want it.')
+      this.emit('archive')
+    }
   }
 
   /** 'none' only when we are confident no editable text has focus; unknown cases still paste. */
@@ -603,10 +778,13 @@ export class Coordinator extends EventEmitter {
 
   /** Control–Option–V or the menu: put a recent dictation where the cursor is. */
   async pasteLast(index = 0): Promise<void> {
+    if (this.state.phase !== 'ready') return
     const entry = this.state.history[index]
     if (!entry) { shell.beep(); return }
-    const outcome = await this.deliver(entry.text)
+    const outcome = await this.deliver(entry.text, true)
     if (outcome !== 'pasted') this.update({ notice: 'Copied your dictation. Press Command–V where you want it.' })
+    this.setPhase('ready', outcome === 'pasted' ? 'Pasted. Your last dictation is at your current cursor.' : 'Copied. Focus a text box, then press Command–V.')
+    this.onToggleRequested()
   }
 
   // MARK: Permissions and settings
@@ -669,24 +847,60 @@ export class Coordinator extends EventEmitter {
 
   // MARK: Learning
 
-  /** Learn from the user's corrected copy of the last dictation. */
+  /** Clipboard learning also goes through review; nothing is stored until confirmation. */
   async learnCorrectionFromClipboard(): Promise<string> {
     const corrected = (await clipboard.readText()).trim()
-    if (!corrected || !this.state.transcript) return 'Copy your corrected text first.'
-    let feedback = 'Nothing changed, so there was nothing to learn.'
-    if (this.stored.learnCorrections && corrected !== this.state.transcript) {
-      // Saved examples teach usage in context; no global grammar substitutions.
-      this.personal = loadPersonal()
-      this.personal.examples = [...this.personal.examples, { id: newID(), original: this.state.transcript.slice(0, 240), corrected: corrected.slice(0, 240) }].slice(-10)
-      try { savePersonal(this.personal); feedback = 'Correction saved on this Mac. Future cleanup will use it.' }
-      catch (error) { feedback = `Could not save your correction: ${(error as Error).message}` }
-      this.update({ notice: feedback })
-    } else if (!this.stored.learnCorrections) {
-      feedback = 'Turn on “Learn from corrections” to save examples.'
+    return this.openCorrectionPreview(corrected, false).feedback
+  }
+
+  /** Select corrected text in any app and press Control–Option–L. */
+  async previewCorrection(captured: FocusInfo | null = null, fromShortcut = false): Promise<WordResult> {
+    if (this.state.phase !== 'ready') {
+      const feedback = 'Finish dictating before reviewing a correction.'
+      if (fromShortcut) { this.onNotice('Finish dictating first', feedback); shell.beep() }
+      return { ok: false, feedback }
     }
-    this.update({ transcript: corrected })
-    await this.copyText(corrected)
-    return feedback
+    const focus = captured ?? await this.helper.focus()
+    const corrected = focus && !focus.secure ? focus.selected.trim() : ''
+    return this.openCorrectionPreview(corrected, fromShortcut)
+  }
+
+  private openCorrectionPreview(corrected: string, fromShortcut: boolean): WordResult {
+    const fail = (message: string): WordResult => {
+      this.update({ notice: message })
+      if (fromShortcut) { this.onNotice('Nothing to review', message); shell.beep() }
+      return { ok: false, feedback: message }
+    }
+    if (this.state.phase !== 'ready') return fail('Finish dictating before reviewing a correction.')
+    if (!this.state.transcript) return fail('Dictate a sentence first, then select your corrected version and press Control–Option–L.')
+    if (!corrected) return fail('Select your corrected dictation and press Control–Option–L, or copy it and use Review from clipboard in Settings.')
+    if (corrected === this.state.transcript.trim()) return fail('Nothing changed, so there is nothing to learn.')
+    if (corrected.length > 1000) return fail('Review a shorter correction, up to 1,000 characters.')
+    this.stopMicrophoneTest()
+    this.update({ correction: { id: newID(), original: this.state.transcript.slice(0, 1000), corrected }, notice: '' })
+    this.onCorrectionRequested()
+    return { ok: true, feedback: 'Review the correction before saving it.' }
+  }
+
+  saveCorrection(value: unknown): WordResult {
+    const draft = value as Partial<CorrectionDraft> | null
+    if (!draft || draft.id !== this.state.correction?.id || typeof draft.original !== 'string' || typeof draft.corrected !== 'string') {
+      return { ok: false, feedback: 'This correction has expired. Select the corrected text and try again.' }
+    }
+    const original = draft.original.trim(), corrected = draft.corrected.trim()
+    if (!original || !corrected || original.length > 1000 || corrected.length > 1000) return { ok: false, feedback: 'Use between 1 and 1,000 characters in each version.' }
+    if (original === corrected) return { ok: false, feedback: 'The two versions are identical.' }
+    const personal = loadPersonal()
+    personal.examples = [...personal.examples.filter((entry) => entry.original !== original || entry.corrected !== corrected), { id: newID(), original, corrected }].slice(-10)
+    try { savePersonal(personal) } catch { return { ok: false, feedback: 'Could not save this correction. Try again.' } }
+    this.personal = personal
+    if (!this.stored.learnCorrections) this.setSettings({ learnCorrections: true })
+    this.update({ correction: null, notice: '' })
+    return { ok: true, feedback: 'Correction saved on this Mac. Future grammar cleanup will use it.' }
+  }
+
+  dismissCorrection(): void {
+    this.update({ correction: null })
   }
 
   /**
@@ -722,18 +936,27 @@ export class Coordinator extends EventEmitter {
     this.store({ dismissedSuggestions: [...new Set([...this.stored.dismissedSuggestions, word.toLowerCase()])].slice(-500) })
   }
 
-  addWord(rawWord: string, rawAlias: string): WordResult {
+  addWord(rawWord: string, rawAlias: string, replaceId?: string): WordResult {
     const word = rawWord.trim(), alias = rawAlias.trim()
     if (!word) return { ok: false, feedback: 'Type the word the way you want it spelled.' }
     if (word.length > 100 || alias.length > 100) return { ok: false, feedback: 'Keep each term under 100 characters.' }
     const personal = loadPersonal()
-    const existing = personal.vocabulary.find((entry) => entry.word.localeCompare(word, undefined, { sensitivity: 'accent' }) === 0)
-    if (existing) { existing.word = word; existing.alias = alias }
-    else {
-      if (personal.vocabulary.length >= 200) return { ok: false, feedback: 'Your vocabulary supports 200 personal terms.' }
-      personal.vocabulary.push({ id: newID(), word, alias, learned: false })
+    const target = replaceId ? personal.vocabulary.find((entry) => entry.id === replaceId) : undefined
+    const duplicate = personal.vocabulary.find((entry) => entry.id !== target?.id && entry.word.localeCompare(word, undefined, { sensitivity: 'accent' }) === 0)
+    if (target) {
+      target.word = word
+      target.alias = alias
+      if (duplicate) personal.vocabulary = personal.vocabulary.filter((entry) => entry.id !== duplicate.id)
+      return this.savePersonalWords(personal, `Updated “${word}”.`)
     }
-    return this.savePersonalWords(personal, existing ? `Updated “${word}”.` : `Added “${word}”. Used from your next dictation.`)
+    if (duplicate) {
+      duplicate.word = word
+      duplicate.alias = alias
+      return this.savePersonalWords(personal, `Updated “${word}”.`)
+    }
+    if (personal.vocabulary.length >= 200) return { ok: false, feedback: 'Your vocabulary supports 200 personal terms.' }
+    personal.vocabulary.push({ id: newID(), word, alias, learned: false })
+    return this.savePersonalWords(personal, `Added “${word}”. Used from your next dictation.`)
   }
 
   removeWord(id: string): WordResult {
@@ -744,10 +967,14 @@ export class Coordinator extends EventEmitter {
   }
 
   restoreWord(entry: VocabularyEntry, index: number): WordResult {
+    const word = entry.word.trim(), alias = entry.alias.trim()
+    if (!word || word.length > 100 || alias.length > 100) return { ok: false, feedback: 'Keep each term under 100 characters.' }
     const personal = loadPersonal()
     if (personal.vocabulary.some((item) => item.id === entry.id)) return { ok: true, feedback: '' }
-    personal.vocabulary.splice(Math.max(0, Math.min(index, personal.vocabulary.length)), 0, entry)
-    return this.savePersonalWords(personal, `Restored “${entry.word}”.`)
+    if (personal.vocabulary.length >= 200) return { ok: false, feedback: 'Your vocabulary supports 200 personal terms.' }
+    const clean: VocabularyEntry = { id: entry.id || newID(), word, alias, learned: Boolean(entry.learned) }
+    personal.vocabulary.splice(Math.max(0, Math.min(index, personal.vocabulary.length)), 0, clean)
+    return this.savePersonalWords(personal, `Restored “${clean.word}”.`)
   }
 
   private savePersonalWords(personal: Personalization, feedback: string): WordResult {
@@ -771,9 +998,12 @@ export class Coordinator extends EventEmitter {
       if (file) { try { unlinkSync(file) } catch { /* already removed by the worker */ } }
     }
     this.pendingAudio = null
+    this.pieceFiles.clear()
   }
 
   shutdown(): void {
+    this.deliveryToken++
+    this.stopMicrophoneTest()
     this.clearWatchdog()
     this.recordingToken++
     this.endRecordingSession()

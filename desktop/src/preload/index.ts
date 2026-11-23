@@ -26,7 +26,12 @@ const api: DictaitAPI = {
   reloadModels: () => ipcRenderer.send('models:reload'),
   copyText: (text) => ipcRenderer.invoke('clipboard:copy', text),
   learnCorrection: () => ipcRenderer.invoke('correction:learn'),
-  addWord: (word, alias) => ipcRenderer.invoke('vocabulary:add', word, alias),
+  previewCorrection: () => ipcRenderer.invoke('correction:preview'),
+  saveCorrection: (draft) => ipcRenderer.invoke('correction:save', draft),
+  dismissCorrection: () => ipcRenderer.send('correction:dismiss'),
+  startMicTest: () => ipcRenderer.invoke('microphone:test'),
+  stopMicTest: () => ipcRenderer.send('microphone:stop-test'),
+  addWord: (word, alias, replaceId) => ipcRenderer.invoke('vocabulary:add', word, alias, replaceId),
   removeWord: (id) => ipcRenderer.invoke('vocabulary:remove', id),
   restoreWord: (entry, index) => ipcRenderer.invoke('vocabulary:restore', entry, index),
   openFolder: (which) => ipcRenderer.send('folder:open', which),
@@ -35,16 +40,20 @@ const api: DictaitAPI = {
   dismissSuggestion: (word) => ipcRenderer.invoke('vocabulary:dismiss', word),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.send('update:install'),
-  onHud: (callback) => subscribe('hud', callback),
+  onHud: (callback) => {
+    const off = subscribe('hud', callback)
+    ipcRenderer.send('hud:ready')
+    return off
+  },
   hudHidden: () => ipcRenderer.send('hud:hidden'),
   onRecorder: (callback) => {
     const listener = (_event: IpcRendererEvent, command: Parameters<typeof callback>[0], options?: Parameters<typeof callback>[1]) => callback(command, options)
     ipcRenderer.on('recorder', listener)
     return () => { ipcRenderer.removeListener('recorder', listener) }
   },
-  recorderStarted: () => ipcRenderer.send('recorder:started'),
-  recorderFailed: (message) => ipcRenderer.send('recorder:failed', message),
-  recorderData: (audio) => ipcRenderer.send('recorder:data', audio),
+  recorderStarted: (device, requestId) => ipcRenderer.send('recorder:started', device, requestId),
+  recorderFailed: (message, requestId) => ipcRenderer.send('recorder:failed', message, requestId),
+  recorderData: (audio, requestId) => ipcRenderer.send('recorder:data', audio, requestId),
   recorderPiece: (audio, index) => ipcRenderer.send('recorder:piece', audio, index),
   recorderEnded: () => ipcRenderer.send('recorder:ended'),
   recorderLevel: (level) => ipcRenderer.send('recorder:level', level)

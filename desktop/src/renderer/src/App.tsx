@@ -7,15 +7,17 @@ import { SearchField, ToastProvider } from './components/ui'
 import { compact, wordCount } from './lib/format'
 import { smooth } from './lib/motion'
 import { api, useAppState, useArchive } from './lib/store'
-import { GraphView } from './views/Graph'
+import { GraphView, visibleGraphSlice } from './views/Graph'
 import { NotesView } from './views/Notes'
 import { SettingsView } from './views/Settings'
 import { VocabularyView } from './views/Vocabulary'
 import { SetupView } from './views/Setup'
+import { PracticeView } from './views/Practice'
+import { CorrectionReview } from './components/CorrectionReview'
 
-const titles: Record<Section, string> = { notes: 'Notes', graph: 'Graph', vocabulary: 'Vocabulary', settings: 'Settings' }
+const titles: Record<Section, string> = { notes: 'Notes', graph: 'Graph', vocabulary: 'Vocabulary', settings: 'Settings', practice: 'Practice' }
 const placeholders: Partial<Record<Section, string>> = { notes: 'Search your dictations', graph: 'Find a term or note', vocabulary: 'Find a word' }
-const order: Section[] = ['notes', 'graph', 'vocabulary', 'settings']
+const order: Section[] = ['notes', 'graph', 'vocabulary', 'settings', 'practice']
 
 function initialSection(): Section {
   const value = new URLSearchParams(location.search).get('section')?.toLowerCase()
@@ -34,20 +36,28 @@ export function App() {
   const go = useCallback((next: Section) => { setSection(next); setSearch('') }, [])
   useEffect(() => api.onNavigate(go), [go])
 
-  // ⌘F focuses search. ⌘1–4 come from the app menu; previews handle them here.
+  // ⌘F focuses search. ⌘1–5 come from the app menu; previews handle them here. Ignore while a modal overlay is open.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (document.querySelector('dialog[open], .setup')) return
       if (event.metaKey && event.key.toLowerCase() === 'f') { event.preventDefault(); searchInput.current?.focus(); searchInput.current?.select() }
-      if (api.preview && event.metaKey && /^[1-4]$/.test(event.key)) { event.preventDefault(); go(order[Number(event.key) - 1]) }
+      if (api.preview && event.metaKey && /^[1-5]$/.test(event.key)) { event.preventDefault(); go(order[Number(event.key) - 1]) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [go])
 
-  // A graph opened from the menu starts on the busiest term, like the earlier app.
+  const graphSummary = useMemo(() => {
+    const { terms } = visibleGraphSlice(archive)
+    const termIDs = new Set(terms.map((term) => term.id))
+    const links = archive.links.filter((link) => termIDs.has(link.source) && termIDs.has(link.target)).length
+    return { terms, links }
+  }, [archive])
+
+  // A graph opened from the menu starts on the busiest term visible in the graph.
   useEffect(() => {
-    if (section === 'graph' && selectedTerm === null && !selectedNote && archive.terms.length) setSelectedTerm(archive.terms[0].id)
-  }, [section, archive.terms]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (section === 'graph' && selectedTerm === null && !selectedNote && graphSummary.terms.length) setSelectedTerm(graphSummary.terms[0].id)
+  }, [section, graphSummary.terms]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const stats = useMemo(() => {
     const words = archive.notes.reduce((total, note) => total + wordCount(note.body), 0)
@@ -59,9 +69,10 @@ export function App() {
   const subtitle = (() => {
     switch (section) {
       case 'notes': return archive.notes.length ? `${archive.notes.length.toLocaleString()} dictations · ${compact(stats.words)} words · ${compact(stats.week)} this week` : 'Everything you dictate, kept on this Mac.'
-      case 'graph': return `${archive.terms.length.toLocaleString()} terms · ${archive.links.length.toLocaleString()} connections`
+      case 'graph': return `${graphSummary.terms.length.toLocaleString()} terms · ${graphSummary.links.toLocaleString()} connections`
       case 'vocabulary': return state ? `${state.vocabulary.length} personal ${state.vocabulary.length === 1 ? 'word' : 'words'} · ${state.rememberedTerms} learned` : ''
       case 'settings': return 'Private by design. Everything runs on this Mac.'
+      case 'practice': return 'Get comfortable with dictation, one sentence at a time.'
     }
   })()
 
@@ -87,12 +98,12 @@ export function App() {
               </div>
               <div className="header-actions">
                 {placeholders[section] && <SearchField ref={searchInput} value={search} onChange={setSearch} placeholder={placeholders[section]!} />}
-                {section !== 'settings' && (
+                {section !== 'settings' && section !== 'practice' && (
                   <button type="button" className="icon-btn" onClick={archive.reload} aria-label="Refresh" title="Refresh local notes"><RefreshCw size={14} strokeWidth={2} /></button>
                 )}
               </div>
             </header>
-            {archive.error && section !== 'settings' && section !== 'vocabulary' && <div className="banner">{archive.error}</div>}
+            {archive.error && section !== 'settings' && section !== 'vocabulary' && section !== 'practice' && <div className="banner">{archive.error}</div>}
             <AnimatePresence mode="wait" initial={false}>
               <motion.div key={section} className="view" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, transition: { duration: 0.09 } }} transition={smooth}>
                 {section === 'notes' && (
@@ -103,12 +114,14 @@ export function App() {
                     onSelectTerm={setSelectedTerm} onSelectNote={setSelectedNote} onOpenInNotes={openInNotes} />
                 )}
                 {section === 'vocabulary' && state && <VocabularyView vocabulary={state.vocabulary} search={search} />}
-                {section === 'settings' && state && <SettingsView state={state} />}
+                {section === 'settings' && state && <SettingsView state={state} onPractice={() => go('practice')} />}
+                {section === 'practice' && state && <PracticeView state={state} />}
               </motion.div>
             </AnimatePresence>
           </main>
         </div>
-        <AnimatePresence>{state && !state.settings.setupDone && <SetupView key="setup" state={state} />}</AnimatePresence>
+        <AnimatePresence>{state && !state.settings.setupDone && <SetupView key="setup" state={state} onPractice={() => go('practice')} />}</AnimatePresence>
+        {state?.correction && <CorrectionReview key={state.correction.id} draft={state.correction} learning={state.settings.learnCorrections} />}
       </ToastProvider>
     </MotionConfig>
   )

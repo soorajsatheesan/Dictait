@@ -16,13 +16,22 @@ const HOURS = 3_600_000
 
 interface Release { version: string; notes: string; dmg: string; name: string; size: number; sums: string | null }
 
-/** True when version a is newer than b ("0.10.0" > "0.9.3"). */
+/** True when semver a is newer than b ("0.10.0" > "0.9.3"; "0.7.0" > "0.7.0-beta.1"). */
 export function isNewer(a: string, b: string): boolean {
-  const parse = (v: string) => v.replace(/^v/, '').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0)
-  const x = parse(a), y = parse(b)
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
+  const split = (v: string) => {
+    const clean = v.trim().replace(/^v/i, '')
+    const dash = clean.indexOf('-')
+    const core = (dash >= 0 ? clean.slice(0, dash) : clean).split('.').map((part) => Number.parseInt(part, 10) || 0)
+    const pre = dash >= 0 ? clean.slice(dash + 1) : ''
+    return { core, pre }
   }
+  const x = split(a), y = split(b)
+  for (let i = 0; i < Math.max(x.core.length, y.core.length); i++) {
+    if ((x.core[i] ?? 0) !== (y.core[i] ?? 0)) return (x.core[i] ?? 0) > (y.core[i] ?? 0)
+  }
+  if (!x.pre && y.pre) return true
+  if (x.pre && !y.pre) return false
+  if (x.pre && y.pre) return x.pre.localeCompare(y.pre, undefined, { numeric: true }) > 0
   return false
 }
 
@@ -81,6 +90,10 @@ export class Updater {
       this.report({ phase: 'failed', error: `Dictait can’t write to ${dirname(bundle)}. Download it from the website instead.` })
       return
     }
+    if (!release.sums) {
+      this.report({ phase: 'failed', error: 'This release is missing its checksum file (SHA256SUMS.txt). Download it from GitHub instead.' })
+      return
+    }
     this.busy = true
     const work = mkdtempSync(join(tmpdir(), 'dictait-update-'))
     const image = join(work, release.name)
@@ -89,11 +102,11 @@ export class Updater {
     try {
       this.report({ phase: 'downloading', progress: 0, error: '' })
       const digest = await this.download(release.dmg, image, release.size)
-      if (release.sums) {
-        const sums = await (await net.fetch(release.sums)).text()
-        const expected = sums.split('\n').find((line) => line.trim().endsWith(release.name))?.split(/\s+/)[0]
-        if (!expected || expected !== digest) throw new Error('the download doesn’t match its published checksum')
-      }
+      const sumsResponse = await net.fetch(release.sums)
+      if (!sumsResponse.ok) throw new Error(`could not fetch checksums (${sumsResponse.status})`)
+      const sums = await sumsResponse.text()
+      const expected = sums.split('\n').map((line) => line.trim().split(/\s+/)).find((parts) => parts.length >= 2 && parts[1].replace(/^\*/, '') === release.name)?.[0]
+      if (!expected || expected.toLowerCase() !== digest.toLowerCase()) throw new Error('the download doesn’t match its published checksum')
       this.report({ phase: 'installing', progress: 1 })
       await run('/usr/bin/hdiutil', ['attach', image, '-nobrowse', '-readonly', '-mountpoint', volume, '-quiet'])
       try {
@@ -103,16 +116,18 @@ export class Updater {
         await run('/usr/bin/hdiutil', ['detach', volume, '-quiet']).catch(() => {})
       }
       await run('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', staged]).catch(() => {})
-      // Swap once this process has exited, then reopen. If the swap fails, the old app is put back.
+      // Swap once this process has exited, then reopen. Arguments are passed positionally to avoid shell expansion.
       const script = [
-        `while kill -0 ${process.pid} 2>/dev/null; do sleep 0.2; done`,
-        `old="${bundle}.previous"`,
-        `rm -rf "$old"`,
-        `if mv "${bundle}" "$old" && mv "${staged}" "${bundle}"; then rm -rf "$old"; else [ -d "$old" ] && mv "$old" "${bundle}"; fi`,
-        `rm -rf "${work}"`,
-        `open "${bundle}"`
+        'pid="$1"; bundle="$2"; staged="$3"; work="$4"',
+        'i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i + 1)); done',
+        'if kill -0 "$pid" 2>/dev/null; then rm -rf "$staged" "$work"; exit 1; fi',
+        'old="${bundle}.previous"',
+        'rm -rf "$old"',
+        'if mv "$bundle" "$old" && mv "$staged" "$bundle"; then rm -rf "$old"; else [ -d "$old" ] && mv "$old" "$bundle"; fi',
+        'rm -rf "$work"',
+        'open "$bundle"'
       ].join('\n')
-      spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore' }).unref()
+      spawn('/bin/sh', ['-c', script, '--', String(process.pid), bundle, staged, work], { detached: true, stdio: 'ignore' }).unref()
       app.quit()
     } catch (error) {
       rmSync(staged, { recursive: true, force: true })
@@ -128,19 +143,35 @@ export class Updater {
     if (!response.ok || !response.body) throw new Error(`the download failed (${response.status})`)
     const hash = createHash('sha256')
     const file = createWriteStream(path)
+    let writeError: Error | null = null
+    file.on('error', (error) => { writeError = error })
     const total = Number(response.headers.get('content-length')) || size || 1
     let received = 0, reported = 0
     const reader = response.body.getReader()
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      hash.update(value)
-      if (!file.write(value)) await new Promise<void>((resolve) => file.once('drain', () => resolve()))
-      received += value.byteLength
-      if (received - reported > total / 100) { reported = received; this.report({ progress: Math.min(1, received / total) }) }
+    try {
+      for (;;) {
+        if (writeError) throw writeError
+        const { done, value } = await reader.read()
+        if (done) break
+        hash.update(value)
+        if (!file.write(value)) {
+          await new Promise<void>((resolve, reject) => {
+            const onDrain = () => { file.off('error', onErr); resolve() }
+            const onErr = (err: Error) => { file.off('drain', onDrain); reject(err) }
+            file.once('drain', onDrain)
+            file.once('error', onErr)
+          })
+        }
+        received += value.byteLength
+        if (received - reported > total / 100) { reported = received; this.report({ progress: Math.min(1, received / total) }) }
+      }
+      if (writeError) throw writeError
+      await new Promise<void>((resolve, reject) => file.end((error?: Error | null) => (error ? reject(error) : resolve())))
+      return hash.digest('hex')
+    } catch (error) {
+      await reader.cancel().catch(() => {})
+      file.destroy()
+      throw error
     }
-    await new Promise<void>((resolve, reject) => file.end((error?: Error | null) => (error ? reject(error) : resolve())))
-    return hash.digest('hex')
   }
 }
-

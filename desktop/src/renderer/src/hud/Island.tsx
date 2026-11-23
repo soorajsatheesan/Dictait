@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { AlertTriangle, ClipboardCheck, Mic, MicOff, Sparkles, X } from 'lucide-react'
-import { MAX_DICTATION_SECONDS, type HudKind, type HudState } from '@shared/types'
+import { AlertTriangle, AppWindow, ClipboardCheck, Mic, MicOff, Sparkles, X } from 'lucide-react'
+import { HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, type HudKind, type HudState } from '@shared/types'
 import { clock } from '../lib/format'
 import { island, snappy } from '../lib/motion'
 import { api } from '../lib/store'
@@ -9,9 +9,9 @@ import { Recorder } from './recorder'
 
 /** Width and content height of the island for each state; the notch adds its own height on top. */
 const shapes: Record<HudKind, { width: number; height: number }> = {
-  recording: { width: 330, height: 46 }, microphone: { width: 290, height: 52 }, transcribing: { width: 236, height: 46 },
-  cleaning: { width: 222, height: 46 }, preparing: { width: 262, height: 52 }, done: { width: 172, height: 46 },
-  copied: { width: 268, height: 46 }, cancelled: { width: 180, height: 46 }, empty: { width: 292, height: 52 },
+  recording: { width: 400, height: 46 }, microphone: { width: 320, height: 56 }, transcribing: { width: 400, height: 56 },
+  cleaning: { width: 400, height: 56 }, preparing: { width: 320, height: 56 }, done: { width: 400, height: 56 },
+  copied: { width: 400, height: 70 }, cancelled: { width: 240, height: 46 }, empty: { width: 320, height: 56 },
   failed: { width: 380, height: 66 }, info: { width: 280, height: 52 }
 }
 
@@ -40,10 +40,10 @@ export function Island() {
     const off = api.onRecorder(async (command, options) => {
       if (command === 'start') {
         samples.current = []
-        try { await recorder.start(options?.device); api.recorderStarted() }
-        catch (error) { api.recorderFailed((error as Error).message) }
+        try { await recorder.start(options?.device, options?.monitor); api.recorderStarted(recorder.deviceName, options?.requestId) }
+        catch (error) { api.recorderFailed((error as Error).message, options?.requestId) }
       } else if (command === 'stop') {
-        try { api.recorderData((await recorder.stop()).audio) } catch { api.recorderData(null) }
+        try { api.recorderData((await recorder.stop()).audio, options?.requestId) } catch { api.recorderData(null, options?.requestId) }
       } else {
         recorder.cancel()
       }
@@ -58,13 +58,13 @@ export function Island() {
     const tick = () => {
       const t = performance.now() / 1000
       const voice = 0.5 + 0.28 * Math.sin(t * 5.3) * Math.sin(t * 1.7) + 0.18 * Math.sin(t * 13.1)
-      samples.current.push({ time: performance.now(), level: Math.max(0.04, Math.min(1, voice + (Math.random() - 0.5) * 0.2)) })
+      samples.current.push({ time: performance.now(), level: hud.micQuiet ? 0 : Math.max(0.04, Math.min(1, voice + (Math.random() - 0.5) * 0.2)) })
       if (samples.current.length > 240) samples.current.shift()
       frame = window.setTimeout(tick, 32)
     }
     tick()
     return () => window.clearTimeout(frame)
-  }, [hud?.kind, hud?.visible])
+  }, [hud?.kind, hud?.visible, hud?.micQuiet])
 
   // Hints and tips show briefly at the start of each recording, then the island tucks them away.
   useEffect(() => {
@@ -80,20 +80,21 @@ export function Island() {
   const shape = shapes[hud.kind] ?? shapes.info
   const open = hud.visible
   const line = hud.kind === 'recording' ? subline(hud, hint) : null
-  const extra = line ? 22 : 0
+  const active = ['recording', 'transcribing', 'cleaning'].includes(hud.kind)
+  const words = hud.kind === 'recording' && !hud.micQuiet ? hud.live || (hint ? hud.note : '') : ''
+  const extra = (line ? 22 : 0) + (active ? 26 : 0) + (hud.kind === 'recording' && hud.micQuiet ? 30 : words ? 22 : 0)
   const height = open ? top + shape.height + extra : screen.hasNotch ? top : 0
-  const wide = line?.kind === 'live' || line?.kind === 'note' ? 400 : shape.width
-  const width = open ? Math.max(wide, screen.notchWidth + 120) : screen.hasNotch ? screen.notchWidth : 120
+  const width = open ? Math.max(shape.width, screen.notchWidth + 120) : screen.hasNotch ? screen.notchWidth : 120
   const radius = open ? Math.min(24, (shape.height + extra) / 2) : 10
 
   return (
     <div className="stage">
-      <motion.div className={`island ${screen.hasNotch ? 'notched' : 'flat'}`}
+      <motion.div className={`island ${screen.hasNotch ? 'notched' : 'flat'} ${open ? 'open' : 'closed'}`}
         initial={{ width: screen.hasNotch ? screen.notchWidth : 120, height: screen.hasNotch ? top : 0, opacity: 0 }}
         animate={{ width, height, opacity: open ? 1 : 0, borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}
         transition={{ ...island, opacity: open ? { duration: 0.1 } : { delay: 0.26, duration: 0.16 } }}
         onAnimationComplete={() => { if (!visible.current) api.hudHidden() }}>
-        <div className="island-clip" style={{ borderBottomLeftRadius: radius, borderBottomRightRadius: radius, ['--notch' as string]: `${top}px` }}>
+        <div className="island-clip" role="status" aria-live="polite" aria-atomic="true" style={{ borderBottomLeftRadius: radius, borderBottomRightRadius: radius, ['--notch' as string]: `${top}px` }}>
           <AnimatePresence mode="popLayout" initial={false}>
             {open && (
               <motion.div key={hud.kind} className="island-content" style={{ paddingTop: top }}
@@ -101,6 +102,9 @@ export function Island() {
                 animate={{ opacity: 1, scale: 1, filter: 'blur(0px)', transition: { ...snappy, delay: 0.06 } }}
                 exit={{ opacity: 0, scale: 0.96, filter: 'blur(4px)', transition: { duration: 0.12 } }}>
                 <Content hud={hud} samples={samples} line={line} height={shape.height} />
+                {words && <div className={`island-sub ${hud.live ? 'live' : 'note'}`}>{hud.live ? <LiveText text={words} /> : words}</div>}
+                {hud.kind === 'recording' && hud.micQuiet && <div className="island-mic-warning"><MicOff size={12} /><span>Can’t hear you · {hud.microphone || 'Check your microphone'}</span></div>}
+                {active && <DestinationLine hud={hud} />}
               </motion.div>
             )}
           </AnimatePresence>
@@ -110,16 +114,14 @@ export function Island() {
   )
 }
 
-type Line = { kind: 'note' | 'live' | 'holding' | 'editing' | 'hint'; text: string }
+type Line = { kind: 'holding' | 'holdPending' | 'editing' | 'hint' }
 
 /** The one line under the waveform, by priority. */
 function subline(hud: HudState, early: boolean): Line | null {
-  if (hud.note && early) return { kind: 'note', text: hud.note }
-  if (hud.live) return { kind: 'live', text: hud.live.replace(/\s*\n+\s*/g, ' · ') }
-  if (hud.holding) return { kind: 'holding', text: '' }
-  if (hud.editing && early) return { kind: 'editing', text: '' }
-  if (early) return { kind: 'hint', text: '' }
-  return null
+  if (hud.holding) return { kind: 'holding' }
+  if (hud.holdStartedAt !== null) return { kind: 'holdPending' }
+  if (hud.editing && early) return { kind: 'editing' }
+  return { kind: 'hint' }
 }
 
 function Content({ hud, samples, line, height }: { hud: HudState; samples: React.RefObject<Sample[]>; line: Line | null; height: number }) {
@@ -135,11 +137,10 @@ function Content({ hud, samples, line, height }: { hud: HudState; samples: React
           {line && (
             <motion.div key={line.kind} className={`island-sub ${line.kind}`} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4, transition: { duration: 0.12 } }} transition={snappy}>
-              {line.kind === 'live' ? <LiveText text={line.text} />
-                : line.kind === 'note' ? line.text
-                  : line.kind === 'holding' ? <>Let go of <kbd>⌃ Space</kbd> to finish</>
-                    : line.kind === 'editing' ? <>Editing your selection · say what to change</>
-                      : <><kbd>⌃ Space</kbd> finish <span className="sep" /> hold to talk <span className="sep" /> <kbd>esc</kbd> cancel</>}
+              {line.kind === 'holdPending' ? <><HoldProgress startedAt={hud.holdStartedAt!} /><span>Keep holding for hold-to-talk</span></>
+                    : line.kind === 'holding' ? <><span className="hold-active-dot" />Release <kbd>⌃ Space</kbd> to finish</>
+                    : line.kind === 'editing' ? <>Editing selection · tap <kbd>⌃ Space</kbd> to finish</>
+                      : <><span>Tap <kbd>⌃ Space</kbd> to finish</span><span className="sep" /><kbd>esc</kbd> cancel</>}
             </motion.div>
           )}
         </AnimatePresence>
@@ -163,19 +164,53 @@ function Content({ hud, samples, line, height }: { hud: HudState; samples: React
   )
 }
 
+function DestinationLine({ hud }: { hud: HudState }) {
+  const destination = hud.destination
+  return <div className="island-destination">
+    {destination?.icon ? <img src={destination.icon} width={14} height={14} alt="" /> : <AppWindow size={13} aria-hidden />}
+    <span>{destination?.appName ? `${destination.editable === false ? 'No text box in' : 'Current app:'} ${destination.appName}` : 'Text goes to your focused field'}</span>
+  </div>
+}
+
+function HoldProgress({ startedAt }: { startedAt: number }) {
+  const bar = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    const animation = bar.current?.animate([{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }],
+      { duration: HOLD_TO_TALK_MS, easing: 'linear', fill: 'forwards' })
+    if (animation) animation.currentTime = Math.max(0, Date.now() - startedAt)
+    return () => animation?.cancel()
+  }, [startedAt])
+  return <span className="hold-progress" aria-hidden="true"><span ref={bar} /></span>
+}
+
+/** Find how much of `text` is newly appended, even when `text` is a 400-char sliding window. */
+function splitAppended(prev: string, next: string): [string, string] {
+  if (!prev || prev === next) return [next, '']
+  if (next.startsWith(prev)) return [prev, next.slice(prev.length)]
+  // Sliding window: find the longest suffix of `prev` that matches a prefix of `next`.
+  const maxOverlap = Math.min(prev.length, next.length)
+  for (let len = maxOverlap; len >= 12; len--) {
+    if (next.startsWith(prev.slice(prev.length - len))) {
+      return [next.slice(0, len), next.slice(len)]
+    }
+  }
+  return [next, '']
+}
+
 /** The newest words, right-aligned; what was just added fades in. */
 function LiveText({ text }: { text: string }) {
-  const previous = useRef('')
-  const added = text.startsWith(previous.current) ? text.slice(previous.current.length) : ''
-  const stable = text.slice(0, text.length - added.length)
-  useEffect(() => { previous.current = text }, [text])
+  const [shown, setShown] = useState<{ text: string; stable: string; added: string; seq: number }>({ text, stable: text, added: '', seq: 0 })
+  if (shown.text !== text) {
+    const [stable, added] = splitAppended(shown.text, text)
+    setShown({ text, stable, added, seq: added ? shown.seq + 1 : shown.seq })
+  }
   return (
     <span className="live-text">
       <span className="live-inner">
-        {stable.slice(-160)}
-        {added && (
-          <motion.span key={text.length} initial={{ opacity: 0, filter: 'blur(3px)' }} animate={{ opacity: 1, filter: 'blur(0px)' }} transition={{ duration: 0.35 }}>
-            {added}
+        {shown.stable.slice(-160)}
+        {shown.added && (
+          <motion.span key={shown.seq} initial={{ opacity: 0, filter: 'blur(3px)' }} animate={{ opacity: 1, filter: 'blur(0px)' }} transition={{ duration: 0.35 }}>
+            {shown.added}
           </motion.span>
         )}
       </span>

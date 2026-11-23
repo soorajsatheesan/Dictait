@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { paths } from './paths'
+import type { Destination } from '@shared/types'
 
 export interface FocusInfo {
   app: string
@@ -13,12 +14,8 @@ export interface FocusInfo {
   window: string
 }
 
-/**
- * Where pasted text went: where the dictation started, or why it could not go there.
- * 'waiting': that place is not on screen (another conversation, a closed window), so the helper
- * pastes it when the user goes back. 'moved': no text box was known, and the user left the window.
- */
-export type Delivery = 'pasted' | 'waiting' | 'moved' | 'no-target' | 'gone' | 'no-anchor' | 'untrusted' | 'failed'
+/** Delivery into the field that has focus when the text is ready. */
+export type Delivery = 'pasted' | 'no-target' | 'untrusted' | 'failed'
 /** Replacing the last insertion: done, edited since (so left alone), or no longer there. */
 export type Replacement = 'replaced' | 'changed' | 'gone' | 'untrusted' | 'failed'
 
@@ -40,6 +37,7 @@ export interface HotKeySpec {
  * the focused text field, ⌘V, and microphones. Restarts itself if it ever exits.
  */
 export class NativeHelper extends EventEmitter {
+  lastDeliveryDestination: Destination | null = null
   private child: ChildProcessWithoutNullStreams | null = null
   private next = 1
   private pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; timer: NodeJS.Timeout }>()
@@ -69,7 +67,7 @@ export class NativeHelper extends EventEmitter {
     })
     child.on('error', () => this.exited(child))
     child.on('exit', () => this.exited(child))
-    if (this.hotkeys.length) void this.registerHotkeys(this.hotkeys)
+    if (this.hotkeys.length) void this.registerHotkeys(this.hotkeys).then((registered) => this.emit('hotkeys-registered', registered))
   }
 
   private exited(child: ChildProcessWithoutNullStreams): void {
@@ -77,6 +75,7 @@ export class NativeHelper extends EventEmitter {
     this.child = null
     for (const [, waiter] of this.pending) { clearTimeout(waiter.timer); waiter.resolve({}) }
     this.pending.clear()
+    this.emit('disconnected')
     if (this.stopped || this.restarts > 20) return
     this.restarts++
     setTimeout(() => this.start(), Math.min(5000, 300 * this.restarts)).unref()
@@ -84,11 +83,8 @@ export class NativeHelper extends EventEmitter {
 
   private receive(message: Record<string, unknown>): void {
     if (message.event === 'hotkey') {
-      this.emit('hotkey', String(message.name), message.state === 'down')
-      return
-    }
-    if (message.event === 'delivered') {
-      this.emit('delivered', String(message.text ?? ''), message.outcome === 'pasted')
+      this.emit('hotkey', String(message.name), message.state === 'down', parseFocus(message.focus),
+        typeof message.at === 'number' ? message.at : Date.now())
       return
     }
     const waiter = this.pending.get(Number(message.id))
@@ -117,39 +113,35 @@ export class NativeHelper extends EventEmitter {
     return (reply.registered as Record<string, boolean>) ?? {}
   }
 
-  /** With `anchor`, the helper remembers this text field as where the coming dictation goes. */
-  async focus(anchor = false): Promise<FocusInfo | null> {
-    const reply = await this.request('focus', { anchor }, 800)
-    if (!('app' in reply)) return null
-    return {
-      app: String(reply.app ?? ''), appName: String(reply.appName ?? ''),
-      editable: typeof reply.editable === 'boolean' ? reply.editable : null,
-      before: String(reply.before ?? ''), selected: String(reply.selected ?? ''), secure: Boolean(reply.secure),
-      window: String(reply.window ?? '')
-    }
+  /** Context for recognition and voice edits; it does not set a delivery destination. */
+  async focus(): Promise<FocusInfo | null> {
+    return parseFocus(await this.request('focus', {}, 2500))
   }
 
-  forget(): void {
-    void this.request('forget')
-  }
-
-  /**
-   * Pastes the text where the dictation started, going back there if focus has moved. A slow
-   * or missing reply is 'failed', never a paste wherever the cursor happens to be.
-   */
+  /** Inserts into the current focus without activating apps or restoring an earlier cursor. */
   async deliver(text: string): Promise<Delivery> {
-    const outcome = (await this.request('deliver', { text }, 10000)).outcome
+    const reply = await this.request('deliver', { text }, 4000)
+    this.lastDeliveryDestination = parseDestination(reply.destination)
+    const outcome = reply.outcome
     return typeof outcome === 'string' ? outcome as Delivery : 'failed'
+  }
+
+  async activeWindow(): Promise<{ bounds: { x: number; y: number; width: number; height: number } | null; destination: Destination | null }> {
+    const reply = await this.request('active-window')
+    const bounds = reply.bounds as Record<string, number> | undefined
+    return {
+      bounds: bounds && ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(bounds[key]))
+        ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null,
+      destination: parseDestination(reply.destination)
+    }
   }
 
   /** Swaps Dictait's last insertion, still reading `expected`, for the clipboard. */
   async replaceLast(expected: string, text: string): Promise<Replacement> {
-    const outcome = (await this.request('replace-last', { expected, text }, 8000)).outcome
+    const reply = await this.request('replace-last', { expected, text }, 8000)
+    this.lastDeliveryDestination = parseDestination(reply.destination)
+    const outcome = reply.outcome
     return typeof outcome === 'string' ? outcome as Replacement : 'gone'
-  }
-
-  async paste(): Promise<boolean> {
-    return (await this.request('paste', {}, 2000)).ok === true
   }
 
   async inputs(): Promise<InputDevice[]> {
@@ -162,5 +154,24 @@ export class NativeHelper extends EventEmitter {
     this.child?.stdin.end()
     this.child?.kill()
     this.child = null
+  }
+}
+
+function parseDestination(value: unknown): Destination | null {
+  if (!value || typeof value !== 'object') return null
+  const info = value as Record<string, unknown>
+  if (typeof info.appName !== 'string' || !info.appName) return null
+  return { app: String(info.app ?? ''), appName: info.appName, icon: typeof info.icon === 'string' ? info.icon : '',
+    editable: typeof info.editable === 'boolean' ? info.editable : null }
+}
+
+function parseFocus(value: unknown): FocusInfo | null {
+  if (!value || typeof value !== 'object' || !('app' in value)) return null
+  const reply = value as Record<string, unknown>
+  return {
+    app: String(reply.app ?? ''), appName: String(reply.appName ?? ''),
+    editable: typeof reply.editable === 'boolean' ? reply.editable : null,
+    before: String(reply.before ?? ''), selected: String(reply.selected ?? ''), secure: Boolean(reply.secure),
+    window: String(reply.window ?? '')
   }
 }

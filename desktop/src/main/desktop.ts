@@ -8,6 +8,9 @@ import { saveSettings } from './settings'
 /** The main window: Notes, Graph, Vocabulary and Settings. Closing it keeps dictation running. */
 export class DesktopWindow {
   private window: BrowserWindow | null = null
+  private loaded = false
+  private pendingSection: Section | null = null
+  onPolicyChanged: () => void = () => {}
 
   constructor(private model: Coordinator, private preload: string, private rendererURL: string | undefined, private rendererDir: string) {}
 
@@ -17,17 +20,26 @@ export class DesktopWindow {
   show(section?: Section): void {
     if (!this.window || this.window.isDestroyed()) this.create(section)
     else {
-      if (section) this.window.webContents.send('navigate', section)
+      if (section) {
+        if (this.loaded) this.window.webContents.send('navigate', section)
+        else this.pendingSection = section
+      }
       this.model.refreshPermissions()
-      this.window.webContents.send('archive:changed')
+      if (this.loaded) this.window.webContents.send('archive:changed')
       if (this.window.isMinimized()) this.window.restore()
+      // Move the existing window onto the user's current Space instead of jumping Spaces.
+      this.window.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true })
       this.window.show()
+      this.window.setVisibleOnAllWorkspaces(false, { skipTransformProcessType: true })
     }
     app.setActivationPolicy('regular')
+    this.onPolicyChanged()
     app.focus({ steal: true })
   }
 
   private create(section?: Section): void {
+    this.loaded = false
+    this.pendingSection = null
     const saved = this.model.stored.windowBounds
     const onScreen = saved && screen.getAllDisplays().some(({ workArea: area }) =>
       saved.x < area.x + area.width - 80 && saved.x + saved.width > area.x + 80 && saved.y >= area.y - 10 && saved.y < area.y + area.height - 80)
@@ -40,13 +52,29 @@ export class DesktopWindow {
     })
     this.window = window
     window.once('ready-to-show', () => window.show())
+    window.webContents.on('did-finish-load', () => {
+      this.loaded = true
+      if (this.pendingSection) {
+        window.webContents.send('navigate', this.pendingSection)
+        this.pendingSection = null
+      }
+    })
+    // Refresh Microphone/Accessibility status as soon as the user returns from System Settings.
+    window.on('focus', () => {
+      this.model.refreshPermissions()
+      if (this.loaded && !window.isDestroyed()) window.webContents.send('archive:changed')
+    })
     window.on('close', () => {
       this.model.stored.windowBounds = window.getNormalBounds()
       saveSettings(this.model.stored)
     })
     window.on('closed', () => {
+      this.model.stopMicrophoneTest()
+      this.loaded = false
+      this.pendingSection = null
       this.window = null
       app.setActivationPolicy('accessory')
+      this.onPolicyChanged()
     })
     // Links in notes open in the user's browser, never inside Dictait.
     window.webContents.setWindowOpenHandler(({ url }) => {
@@ -72,7 +100,14 @@ export class DesktopWindow {
   }
 
   refreshIfVisible(): void {
-    if (this.isVisible) this.window?.webContents.send('archive:changed')
+    if (this.isVisible && this.loaded) this.window?.webContents.send('archive:changed')
+  }
+
+  async practiceFocused(): Promise<boolean> {
+    if (BrowserWindow.getFocusedWindow() !== this.window || !this.window) return false
+    try {
+      return Boolean(await this.window.webContents.executeJavaScript("document.activeElement?.matches('textarea[data-practice=true]') === true"))
+    } catch { return false }
   }
 
   send(channel: string, ...args: unknown[]): void {

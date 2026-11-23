@@ -22,10 +22,11 @@ export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onS
   const current = notes.find((note) => note.id === selected) ?? notes[0]
   const list = useRef<HTMLDivElement>(null)
 
-  // Arrow keys move through the list unless the user is typing.
+  // Arrow keys move through the list unless the user is typing or a modal overlay is open.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!['ArrowDown', 'ArrowUp'].includes(event.key) || (event.target as HTMLElement).closest('input, textarea')) return
+      if (document.querySelector('dialog[open], .setup')) return
       const index = notes.findIndex((note) => note.id === current?.id)
       const next = notes[Math.max(0, Math.min(notes.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]
       if (!next) return
@@ -47,7 +48,7 @@ export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onS
     <div className="notes">
       <motion.div className="note-list" ref={list} layoutScroll role="listbox" aria-label="Dictations">
         {groups.map((group) => (
-          <section key={group.label} className="note-group">
+          <section key={group.key} className="note-group">
             <h3 className="eyebrow note-group-label">{group.label}</h3>
             {group.notes.map((note) => (
               <NoteRow key={note.id} note={note} active={note.id === current?.id} search={search} archive={archive} onSelect={() => onSelect(note.id)} />

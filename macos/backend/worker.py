@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import select
 import sys
 import time
 import wave
@@ -206,6 +207,18 @@ def _similar(a, b):
 REPLIES = {"thanks", "thank", "now", "yes", "yeah", "no", "okay", "ok", "right", "sure", "great", "cool", "exactly",
            "done", "bye", "hi", "hello", "please", "sorry", "well", "so", "anyway", "also", "again", "true", "nice",
            "perfect", "fine", "good", "agreed", "absolutely", "definitely", "maybe", "later", "soon", "today", "tomorrow"}
+# Function words cannot anchor an implicit multi-word restatement, or normal sentences like
+# "I saw John. I left." or "The app works." get spliced into the previous sentence.
+RESTATEMENT_STOPWORDS = {
+    "a", "an", "the", "i", "me", "my", "we", "us", "our", "you", "your", "he", "him", "his", "she", "her",
+    "it", "its", "they", "them", "their", "this", "that", "these", "those", "is", "am", "are", "was", "were",
+    "be", "been", "being", "to", "in", "of", "for", "on", "at", "by", "with", "from", "as", "and", "or",
+    "but", "not", "so", "if", "do", "did", "does", "has", "have", "had", "will", "would", "can", "could",
+    "should", "there", "here",
+}
+SUBJECT_PRONOUNS = {"i", "we", "you", "he", "she", "it", "they", "there"}
+OBJECT_PRONOUNS = {"it", "them", "him", "her", "me", "us"}
+DETERMINERS = {"the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "his", "her", "its", "their"}
 
 
 def resolve_restatements(text):
@@ -213,11 +226,13 @@ def resolve_restatements(text):
     "under GitHub's permission. Permitted." → "under GitHub's permitted."
     "to the finance team. Marketing team." → "to the marketing team."
     Everything else in the sentence stays exactly as spoken."""
-    marker = r"^(?:(?:no|sorry|i mean|or rather|rather|actually)[,]?\s+)?(.*?)(?:,?\s+i mean)?[.!?]*$"
+    marker = r"^(?P<lead>(?:no|sorry|i mean|or rather|rather|actually)[,]?\s+)?(?P<body>.*?)(?P<tail>,?\s+i mean)?[.!?]*$"
     sentences = [part for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part]
     result = []
     for sentence in sentences:
-        fragment = re.match(marker, sentence.strip(), re.I).group(1).strip(" ,")
+        match = re.match(marker, sentence.strip(), re.I)
+        explicit = bool(match.group("lead") or match.group("tail"))
+        fragment = match.group("body").strip(" ,")
         words = fragment.split()
         previous = result[-1] if result else ""
         tokens = re.findall(r"[\w'’-]+", previous)
@@ -228,14 +243,20 @@ def resolve_restatements(text):
             if len(words) == 1:
                 matches = [index for index, token in enumerate(tokens) if _similar(token, words[0])]
                 if matches:
-                    span = (matches[-1], matches[-1] + 1)
-                    replaced = span
-            elif words[-1].casefold() in lower:  # "Marketing team" restates "finance team"
-                end = len(lower) - 1 - lower[::-1].index(words[-1].casefold())
-                replaced = (max(0, end - len(words) + 1), end + 1)
-            elif words[0].casefold() in lower:  # "Electron app" restates "electron framework"
-                start = len(lower) - 1 - lower[::-1].index(words[0].casefold())
-                replaced = (start, min(len(tokens), start + len(words)))
+                    replaced = (matches[-1], matches[-1] + 1)
+            elif explicit or (words[0].casefold() not in SUBJECT_PRONOUNS and words[-1].casefold() not in OBJECT_PRONOUNS):
+                tail_anchor = words[-1].casefold()
+                head_anchor = words[0].casefold()
+                if tail_anchor in lower and tail_anchor not in RESTATEMENT_STOPWORDS and (explicit or len(tail_anchor) >= 4):
+                    end = len(lower) - 1 - lower[::-1].index(tail_anchor)
+                    span = (max(0, end - len(words) + 1), end + 1)
+                    if explicit or tokens[span[0]].casefold() not in DETERMINERS or head_anchor in DETERMINERS:
+                        replaced = span
+                elif head_anchor in lower and head_anchor not in RESTATEMENT_STOPWORDS and (explicit or len(head_anchor) >= 4):
+                    start = len(lower) - 1 - lower[::-1].index(head_anchor)
+                    span = (start, min(len(tokens), start + len(words)))
+                    if explicit or tokens[span[0]].casefold() not in DETERMINERS or head_anchor in DETERMINERS:
+                        replaced = span
         if replaced is None:
             result.append(sentence)
             continue
@@ -293,6 +314,23 @@ def apply_vocabulary(text, entries):
 SCRATCH = re.compile(
     r"(?:^|(?<=[.,;!?]))\s*(?:(?:no|oh|oops|uh|um)[,.]?\s+)?(?:scratch|strike|delete|erase) (?:that|this|the last (?:sentence|bit|part|line))\s*(?:[.,;!?]+|$)",
     re.I)
+ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e"}
+
+
+def _last_sentence_boundary(before):
+    """Index of the last real sentence terminator, skipping decimal numbers (3.5) and abbreviations (Dr.)."""
+    for idx in range(len(before) - 1, -1, -1):
+        ch = before[idx]
+        if ch in "!?\n":
+            return idx
+        if ch == ".":
+            if idx > 0 and idx + 1 < len(before) and before[idx - 1].isdigit() and before[idx + 1].isdigit():
+                continue
+            word_match = re.search(r"([a-z]+(?:\.[a-z]+)*)$", before[:idx], re.I)
+            if word_match and word_match.group(1).casefold() in ABBREVIATIONS:
+                continue
+            return idx
+    return -1
 
 
 def apply_voice_commands(text):
@@ -304,11 +342,20 @@ def apply_voice_commands(text):
             break
         # The sentence just spoken ends at the command; drop back to the one before it.
         before = text[:match.start()].rstrip(" ,;.!?")
-        boundary = max(before.rfind(mark) for mark in ".!?\n")
+        boundary = _last_sentence_boundary(before)
         before = before[:boundary + 1] if boundary >= 0 else ""
         text = (before + " " + text[match.end():].lstrip(" ,.")).strip()
-    text = re.sub(r"(?:^|[.,;!?])\s*(?:new|next) paragraph\s*(?:[.,;!?]+\s*|$)", ".\n\n", text, flags=re.I)
-    text = re.sub(r"(?:^|[.,;!?])\s*(?:new|next) line\s*(?:[.,;!?]+\s*|$)", ".\n", text, flags=re.I)
+
+    def _break(suffix):
+        def replace(match):
+            punct = match.group(1) or ""
+            if not punct:
+                return suffix
+            return (punct if punct in "!?" else ".") + suffix
+        return replace
+
+    text = re.sub(r"(^|[.,;!?])\s*(?:new|next) paragraph\s*(?:[.,;!?]+\s*|$)", _break("\n\n"), text, flags=re.I)
+    text = re.sub(r"(^|[.,;!?])\s*(?:new|next) line\s*(?:[.,;!?]+\s*|$)", _break("\n"), text, flags=re.I)
     text = re.sub(r"^\.\n+", "", text)
     text = re.sub(r"\.\.\n", ".\n", text)
     return re.sub(r"[ \t]+\n", "\n", text).strip()
@@ -444,11 +491,21 @@ def list_items(content):
     return items
 
 
+NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+    "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15", "sixteen": "16",
+    "seventeen": "17", "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30",
+    "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+}
+
+
 def coverage(raw, edited):
     """Share of the original's words (counted with repeats) that survive in an edit."""
     def counts(text):
         tally = {}
-        for word in re.findall(r"[a-z0-9']{3,}", text.casefold()):
+        # Unicode-aware tokenization so Hindi (Devanagari) and accented languages are checked too.
+        for word in re.findall(r"[^\W_][\w'\u0900-\u097f]{2,}", text.casefold()):
             tally[word] = tally.get(word, 0) + 1
         return tally
     before, after = counts(raw), counts(edited)
@@ -464,8 +521,13 @@ def valid_edit(raw, edited, intent="cleanup"):
     minimum = 0.06 if intent in {"summary", "summary_bullets"} else 0.15 if intent == "concise" else 0.35
     if len(edited) > max(80, len(raw) * 2) or len(edited) < len(raw) * minimum:
         return False
-    if re.search(r"(?i)^(here(?:'s| is)|corrected (?:text|version)|i cannot|i can't)", edited):
+    raw_stripped = raw.strip()
+    # Reject LLM meta-preambles/refusals, without falsely rejecting dictations that genuinely start with "Here's..." or "I can't...".
+    if re.search(r"(?i)^(here(?:'s| is)\s+(?:the\s+)?(?:corrected|edited|cleaned|rewritten|formatted|updated|revised|summarized)|corrected (?:text|version)\s*:)", edited):
         return False
+    if re.search(r"(?i)^(here(?:'s| is)\b|corrected (?:text|version)\b|i cannot\b|i can't\b)", edited):
+        if not re.search(r"(?i)^(here(?:'s| is)\b|corrected (?:text|version)\b|i cannot\b|i can't\b)", raw_stripped):
+            return False
     # Tidying and list-making must not quietly drop sentences or items.
     needed = {"cleanup": 0.7, "bullets": 0.7, "numbered": 0.7, "paragraphs": 0.7, "email": 0.55, "prompt": 0.45}.get(intent)
     if needed and coverage(raw, edited) < needed:
@@ -475,7 +537,15 @@ def valid_edit(raw, edited, intent="cleanup"):
         edited = re.sub(r"(?m)^\s*(?:[-*•]\s*)?\d+[.)]\s+", "", edited)
         raw = without_list_labels(raw)
     raw = re.sub(r"\b\d+(?:[.,]\d+)*\s*[,;-]?\s*(?:no|sorry|actually|i mean)[, ]+(?:at\s+)?(?=\d)", "", raw, flags=re.I)
-    return set(re.findall(r"\d+(?:[.,]\d+)*", raw)) == set(re.findall(r"\d+(?:[.,]\d+)*", edited))
+    norm_raw = re.sub(r"(?<=\d),(?=\d{3}\b)", "", raw)
+    norm_edited = re.sub(r"(?<=\d),(?=\d{3}\b)", "", edited)
+    raw_nums = set(re.findall(r"\d+(?:\.\d+)?", norm_raw))
+    edited_nums = set(re.findall(r"\d+(?:\.\d+)?", norm_edited))
+    if raw_nums != edited_nums:
+        spoken_nums = {NUMBER_WORDS[w] for w in re.findall(r"\b[a-z]+\b", norm_raw.casefold()) if w in NUMBER_WORDS}
+        if not (raw_nums <= edited_nums and (edited_nums - raw_nums) <= spoken_nums):
+            return False
+    return True
 
 
 def fetch_models(repos, report, status):
@@ -643,6 +713,7 @@ class Engine:
         """`previous` is the text just before this audio: the document before the cursor, or the
         dictation so far. Whisper continues from it, which keeps names and spelling consistent."""
         if self.backend == "parakeet":
+            self.detected_language = None if language == "auto" else language
             return self.parakeet_transcribe(audio).strip()
         glossary = ", ".join(e["word"] for e in self.vocabulary[:40] if e.get("word"))
         hint = " ".join(part for part in [glossary + "." if glossary else "", previous[-200:].strip()] if part)
@@ -687,7 +758,7 @@ class Engine:
         start = time.perf_counter()
         parts = []
         prompt = self.prompt(content, intent)
-        max_tokens = min(1024, max(64, len(self.tokenizer.encode(text)) * 2 + 24))
+        max_tokens = min(4096, max(64, len(self.tokenizer.encode(content)) * 2 + 64))
         stream = stream_generate(self.llm, self.tokenizer, prompt=prompt,
                                  max_tokens=max_tokens, sampler=make_sampler(temp=0.0))
         last = None
@@ -795,15 +866,20 @@ class Engine:
         tail, warning = self.clean(last, smart=False) if last else ("", None)
         text = join_parts([*cleaned, tail])
         if intent != "cleanup":
-            _, text = writing_intent(text, True)  # Drop the unfulfilled instruction itself.
+            _, stripped = writing_intent(text, True)
+            if intent in {"summary", "summary_bullets", "concise"} and stripped:
+                edited, retry_warning = self.clean(stripped, budget=min(20.0, max(6.0, len(stripped.split()) / 30)), intent=intent)
+                if retry_warning is None:
+                    return edited, None
+            text = stripped
         return text, warning
 
-    def index_memory(self, text, language, save_note=False, note_id=None):
+    def index_memory(self, text, language, save_note=False, note_id=None, use_llm=True):
         if self.memory is None or not text:
             return None
         from memory import fallback_entities
         entities = fallback_entities(text)
-        if self.llm is not None:
+        if use_llm and self.llm is not None:
             # Run after delivering/pasting the transcript, off the user-visible path.
             from mlx_lm import stream_generate
             from mlx_lm.sample_utils import make_sampler
@@ -828,10 +904,16 @@ class Engine:
                 pass
             finally:
                 stream.close()
-        saved = self.memory.remember(text, entities, language, save_note=save_note and note_id is None)
+        lowered = text.casefold()
+        validated = [
+            e for e in entities[:24]
+            if isinstance(e, dict) and isinstance(e.get("term"), str)
+            and 1 < len(e["term"].strip()) <= 80 and e["term"].casefold().strip() in lowered
+        ]
+        saved = self.memory.remember(text, validated, language, save_note=save_note and note_id is None)
         note_id = note_id or saved
         if note_id:
-            self.memory.attach_terms(note_id, entities)
+            self.memory.attach_terms(note_id, validated, text=text)
             self.memory.write_note(note_id)
         return self.memory.stats()
 
@@ -852,10 +934,23 @@ def configure(engine, request):
     engine.context = str(request.get("context", ""))[-500:]
     engine.app_kind = str(request.get("app_kind", ""))
     examples = request.get("examples", [])
-    engine.examples = [{"original": str(e.get("original", ""))[:240],
-                        "corrected": str(e.get("corrected", ""))[:240]}
+    engine.examples = [{"original": str(e.get("original", ""))[:1000],
+                        "corrected": str(e.get("corrected", ""))[:1000]}
                        for e in examples[-3:] if isinstance(e, dict)] if isinstance(examples, list) else []
     return personal_words
+
+
+def _has_pending_input(source):
+    """True when another JSON request is already waiting on stdin, so optional LLM indexing yields immediately."""
+    try:
+        fd = source.fileno()
+    except Exception:
+        return False
+    try:
+        ready, _, _ = select.select([fd], [], [], 0)
+        return bool(ready)
+    except Exception:
+        return False
 
 
 def serve(engine, source, output):
@@ -899,7 +994,7 @@ def serve(engine, source, output):
                     # piece stays open, so a following "scratch that" can still remove it.
                     pending = session["raw"][session["consumed"]:-1]
                     if request.get("cleanup", True) and sum(len(part.split()) for part in pending) >= GROUP_WORDS:
-                        group = apply_voice_commands(" ".join(pending))
+                        group = resolve_restatements(apply_voice_commands(" ".join(pending)))
                         cleaned = group
                         if session["groups"]:
                             engine.context = ""  # Only the first stretch continues the document's text.
@@ -956,9 +1051,16 @@ def serve(engine, source, output):
             elif raw and request.get("cleanup", True):
                 try:
                     if session and session["groups"]:
-                        rest = apply_voice_commands(" ".join(part for part in pieces[session["consumed"]:] if part))
+                        tail_raw = " ".join(part for part in pieces[session["consumed"]:] if part)
+                        leading_scratch = SCRATCH.match(tail_raw.lstrip())
+                        if leading_scratch and session["groups"]:
+                            prev_group = session["groups"][-1].rstrip(" ,;.!?")
+                            boundary = _last_sentence_boundary(prev_group)
+                            session["groups"][-1] = prev_group[:boundary + 1].strip() if boundary >= 0 else ""
+                            tail_raw = tail_raw.lstrip()[leading_scratch.end():].lstrip(" ,.")
+                        rest = resolve_restatements(apply_voice_commands(tail_raw))
                         engine.context = ""
-                        text, warning = engine.clean_long(raw, session["groups"], rest)
+                        text, warning = engine.clean_long(raw, [g for g in session["groups"] if g], rest)
                     else:
                         text, warning = engine.clean(raw)
                 except Exception as exc:
@@ -978,7 +1080,9 @@ def serve(engine, source, output):
                  warning=warning, language=getattr(engine, "detected_language", None))
             if raw and memory and memory_mode != "off":
                 try:
-                    stats = engine.index_memory(text, getattr(engine, "detected_language", None), save_note=memory_mode == "notes", note_id=note_id)
+                    stats = engine.index_memory(text, getattr(engine, "detected_language", None),
+                                                save_note=memory_mode == "notes", note_id=note_id,
+                                                use_llm=not _has_pending_input(source))
                     emit(output, "memory", **(stats or {}))
                 except Exception as exc:
                     emit(output, "memory_warning", message=f"Could not update local memory: {exc}")
