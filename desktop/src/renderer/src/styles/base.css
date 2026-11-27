@@ -1,7 +1,7 @@
 /* Dictait — "Graphite", printed.
    Plain and quiet: near-black or off-white, hairlines, one typeface in sentence case. Images are
-   1-bit prints in the ink colour (components/Dither.tsx), never glows. Colour is rationed: the
-   orange key cap, and red only while the microphone is live. */
+   1-bit prints in the ink colour (components/Dither.tsx), never glows. No orange anywhere: the
+   logo's grey ink, and red only while the microphone is live. */
 
 :root {
   color-scheme: light dark;
@@ -46,7 +46,7 @@
   --focus: 0 0 0 1px var(--bg), 0 0 0 3px rgba(10, 10, 10, 0.35);
 
   --kind-person: #2F7FE0;
-  --kind-project: #E8521C;
+  --kind-project: #D6336C;
   --kind-organization: #7C5CF0;
   --kind-technical: #0E9F84;
   --kind-topic: #B88300;
@@ -56,8 +56,8 @@
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   --grain-opacity: 0.03;
   --rib-base: #E9E5DF;
-  --rib-core: #FFF4E6;
-  --rib-light: #FFB27A;
+  --rib-core: #FFFFFF;
+  --rib-light: #CFCFD6;
   --rib-hi: 0.55;
   --rib-lo: 0.07;
 
@@ -106,13 +106,13 @@
 
     --grain-opacity: 0.04;
     --rib-base: #0D0C0C;
-    --rib-core: #FFD9B0;
-    --rib-light: #FF7A2E;
+    --rib-core: #F4F4F5;
+    --rib-light: #8E8E96;
     --rib-hi: 0.08;
     --rib-lo: 0.3;
 
     --kind-person: #6AB4FF;
-    --kind-project: #FF7A4D;
+    --kind-project: #FF6B9A;
     --kind-organization: #A98BFF;
     --kind-technical: #3DD6B0;
     --kind-topic: #F2C14E;

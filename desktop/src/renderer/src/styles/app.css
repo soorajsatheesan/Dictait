@@ -52,7 +52,7 @@ button, input, textarea, a, .search, .nav, .record-wrap, .notice-card { -webkit-
 .record-right { margin-left: auto; display: flex; align-items: center; }
 
 /* The Dictate key: a physical key. It rides up, presses down, and stays latched while you record.
-   Its orange cap is the one warm thing in the sidebar. */
+   Its cap is the logo's ink: graphite with a white mic in light mode, silver in dark. */
 .record.key {
   background: linear-gradient(180deg, #FFFFFF, #ECECE9);
   box-shadow: inset 0 1px 0 #fff, inset 0 -2px 0 rgba(0, 0, 0, 0.07), 0 0 0 1px rgba(0, 0, 0, 0.1), 0 2px 0 rgba(0, 0, 0, 0.08), 0 8px 16px -8px rgba(0, 0, 0, 0.25);
@@ -64,10 +64,10 @@ button, input, textarea, a, .search, .nav, .record-wrap, .notice-card { -webkit-
 }
 .key-cap {
   display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 50%; color: #fff;
-  background: radial-gradient(circle at 35% 28%, #FF9A62, #FF5A1F 55%, #D8430E);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.5), inset 0 -2px 3px rgba(120, 30, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+  background: radial-gradient(circle at 35% 28%, #5A5A60, #26262A 58%, #111113);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.28), inset 0 -2px 3px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
 }
-.record.key.recording .key-cap { box-shadow: inset 0 2px 4px rgba(120, 30, 0, 0.5), 0 0 0 0 transparent; background: radial-gradient(circle at 50% 60%, #FF7A3C, #E04E12); }
+.record.key.recording .key-cap { box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.55), 0 0 0 0 transparent; background: radial-gradient(circle at 50% 60%, #3A3A3F, #151517); }
 .record.key.busy .key-cap { background: radial-gradient(circle at 35% 28%, #D7D7D4, #A9A9A5); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.5), inset 0 -2px 3px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.25); }
 .record.key.busy { color: var(--text-2); }
 .record.key.busy .record-right { opacity: 0.4; }
@@ -79,7 +79,9 @@ button, input, textarea, a, .search, .nav, .record-wrap, .notice-card { -webkit-
   }
   .record.key:hover:not(:disabled) { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 -2px 0 rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(0, 0, 0, 0.7), 0 3px 0 rgba(0, 0, 0, 0.5), 0 14px 22px -10px rgba(0, 0, 0, 0.95); }
   .record.key:active:not(:disabled), .record.key.recording { background: linear-gradient(180deg, #151518, #1D1D21); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(0, 0, 0, 0.7); }
-  .record.key.busy .key-cap { background: radial-gradient(circle at 35% 28%, #55555B, #333337); }
+  .key-cap { color: #111113; background: radial-gradient(circle at 35% 28%, #FFFFFF, #D4D4D8 55%, #8E8E95); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.8), inset 0 -2px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.5); }
+  .record.key.recording .key-cap { background: radial-gradient(circle at 50% 60%, #C9C9CE, #8A8A91); box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.45), 0 0 0 0 transparent; }
+  .record.key.busy .key-cap { color: #fff; background: radial-gradient(circle at 35% 28%, #55555B, #333337); }
 }
 /* Busy: a short run of ink dots steps along the key's lower edge, like a print head. */
 .record-sweep { position: absolute; left: 12px; right: 12px; bottom: 4px; height: 2px; overflow: hidden; }
