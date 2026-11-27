@@ -1,4 +1,5 @@
 // A simulated bridge for design previews: synthetic notes, no microphone, no models.
+import { ACTION_NAMES, checkShortcut, DEFAULT_SHORTCUTS, sameShortcut, shortcutKeys, shortcutName, type ShortcutAction } from '@shared/shortcuts'
 import type { AppState, Archive, ArchivedLink, ArchivedNote, ArchivedTerm, DictaitAPI, HudKind, HudState, Section, Suggestion, VocabularyEntry } from '@shared/types'
 
 const HOUR = 3_600_000
@@ -53,14 +54,14 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
   // Previews: ?section=setup shows a fresh install mid-download; ?section=settings offers an update.
   const fresh = new URLSearchParams(location.search).get('section') === 'setup'
   const state: AppState = {
-    phase: fresh ? 'preparing' : 'ready', message: 'Control–Space to start. Press again to finish.', notice: '', recordingStartedAt: null,
+    phase: fresh ? 'preparing' : 'ready', message: `${shortcutName(DEFAULT_SHORTCUTS.dictate)} to start. Press again to finish.`, notice: '', recordingStartedAt: null,
     transcript: 'Discuss Dictait with Maya tomorrow.', timing: '0.74 s total · 0.44 s transcription', detectedLanguage: 'en',
     microphoneAllowed: true, accessibilityAllowed: !fresh, shortcutRegistered: true, correctionShortcutRegistered: true, launchAtLogin: true, loginNeedsApproval: false,
     rememberedTerms: termList.length,
     settings: {
       backend: 'whisper', language: 'auto', cleanup: true, autoPaste: true, smartFormatting: true, writingStyle: 'Keep my natural tone and wording.',
       memoryMode: 'notes', learnCorrections: true, appearance: 'system', useContext: true, voiceEdits: true, appTones: true, microphone: 'auto',
-      setupDone: !fresh, autoUpdate: true, feedbackSounds: true,
+      setupDone: !fresh, autoUpdate: true, feedbackSounds: true, shortcuts: { ...DEFAULT_SHORTCUTS }, whileRecording: 'keep',
       tones: {
         ai: 'Write it as a clear request to an AI assistant: the goal first, then details and constraints. Keep file names, code terms and commands exact.',
         messaging: 'Casual and brief, like a chat message. No greeting or sign-off unless I say one.',
@@ -84,6 +85,7 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
     Object.assign(state, patch)
     listeners.state.forEach((callback) => callback({ ...state }))
   }
+  const key = () => shortcutName(state.settings.shortcuts.dictate)
   let levelTimer: number | undefined
   const timers: number[] = []
   const after = (ms: number, run: () => void) => { timers.push(window.setTimeout(run, ms)) }
@@ -97,7 +99,7 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
     after(1700, () => {
       const body = 'Quick follow-up for Maya: the island animation feels right now. Let us ship the preview build on Friday.'
       archive = { ...archive, notes: [{ id: `demo-${Date.now()}`, body, created: Date.now(), language: 'en', terms: [2] }, ...archive.notes] }
-      emit({ phase: 'ready', message: 'Pasted. Control–Space to dictate again.', transcript: body })
+      emit({ phase: 'ready', message: `Pasted. ${key()} to dictate again.`, transcript: body })
       listeners.archive.forEach((callback) => callback())
     })
   }
@@ -113,7 +115,7 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
     toggleRecording: () => {
       if (state.phase === 'recording') { finish(); return }
       if (state.phase !== 'ready') return
-      emit({ phase: 'recording', message: 'Control–Space to finish. Escape to cancel.', recordingStartedAt: Date.now() })
+      emit({ phase: 'recording', message: `${key()} to finish. Escape to cancel.`, recordingStartedAt: Date.now() })
       let t = 0
       levelTimer = window.setInterval(() => {
         t += 0.05
@@ -124,19 +126,29 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
     cancelRecording: () => {
       if (state.phase !== 'recording') return
       window.clearInterval(levelTimer)
-      emit({ phase: 'ready', message: 'Recording cancelled. Control–Space to try again.', recordingStartedAt: null })
+      emit({ phase: 'ready', message: `Recording cancelled. ${key()} to try again.`, recordingStartedAt: null })
     },
     setSettings: async (patch) => emit({ settings: { ...state.settings, ...patch } }),
     setLaunchAtLogin: async (enabled) => emit({ launchAtLogin: enabled }),
     openLoginItems: () => {},
     retryShortcut: () => emit({ shortcutRegistered: true }),
+    setShortcut: async (action, value) => {
+      const checked = checkShortcut(value, action === 'dictate')
+      if ('error' in checked) return { ok: false, feedback: checked.error }
+      const shortcuts = state.settings.shortcuts
+      const clash = (Object.keys(shortcuts) as ShortcutAction[]).find((other) => other !== action && sameShortcut(shortcuts[other], checked.shortcut))
+      if (clash) return { ok: false, feedback: `${shortcutName(checked.shortcut)} is already set for “${ACTION_NAMES[clash]}”.` }
+      emit({ settings: { ...state.settings, shortcuts: { ...shortcuts, [action]: checked.shortcut } } })
+      return { ok: true, feedback: '' }
+    },
+    captureShortcut: () => {},
     requestMicrophone: () => emit({ microphoneAllowed: true }),
     requestAccessibility: () => emit({ accessibilityAllowed: true }),
     checkForUpdates: async () => emit({ update: { ...state.update, phase: 'checking' } }),
     installUpdate: () => emit({ update: { ...state.update, phase: 'downloading', progress: 0.42 } }),
     reloadModels: () => {
       emit({ phase: 'preparing', message: 'Preparing local models.' })
-      after(1600, () => emit({ phase: 'ready', message: 'Control–Space to start. Press again to finish.' }))
+      after(1600, () => emit({ phase: 'ready', message: `${key()} to start. Press again to finish.` }))
     },
     copyText: async (text) => { try { await navigator.clipboard.writeText(text) } catch { /* preview only */ } },
     learnCorrection: async () => {
@@ -209,12 +221,13 @@ function demoHud(callback: (state: HudState) => void): () => void {
   const pinned = params.get('kind') as HudKind | null
   if (pinned) {
     const step = steps.find(([kind]) => kind === pinned)
-    const copy = pinned === 'copied' ? ['Copied · ready to paste', 'Focus a text box, then ⌘V · ⌃⌥V repeats the last dictation'] : step?.slice(1, 3)
+    const copy = pinned === 'copied' ? ['Copied · ready to paste', `Focus a text box, then ⌘V · ${shortcutKeys(DEFAULT_SHORTCUTS.pasteLast).join('')} repeats the last dictation`] : step?.slice(1, 3)
     const timer = window.setTimeout(() => callback({
       visible: true, kind: pinned, title: String(copy?.[0] ?? 'Needs attention'), detail: String(copy?.[1] ?? 'The model worker stopped. Click Retry to reload models.'),
       startedAt: Date.now() - 12_000, screen, live: pinned === 'recording' ? 'so the plan is to ship the preview build on Friday and then' : '', note: '',
       holding: params.get('mode') === 'hold', holdStartedAt: params.get('mode') === 'pending' ? Date.now() : null, editing: false,
-      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: params.get('quiet') === '1'
+      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: params.get('quiet') === '1',
+      shortcut: shortcutKeys(DEFAULT_SHORTCUTS.dictate).join(' ')
     }), 300)
     return () => window.clearTimeout(timer)
   }
@@ -226,7 +239,8 @@ function demoHud(callback: (state: HudState) => void): () => void {
     index++
     if (kind) last = kind
     callback({ visible: kind !== null, kind: kind ?? last, title, detail, startedAt: kind === 'recording' ? Date.now() : null, screen, live: '', note: '', holding: false, holdStartedAt: null, editing: false,
-      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: false })
+      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: false,
+      shortcut: shortcutKeys(DEFAULT_SHORTCUTS.dictate).join(' ') })
     timer = window.setTimeout(next, duration)
   }
   timer = window.setTimeout(next, 500)

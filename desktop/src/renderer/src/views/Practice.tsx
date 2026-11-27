@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, Mic, RotateCcw, Square } from 'lucide-react'
+import { shortcutKeys, shortcutName } from '@shared/shortcuts'
 import type { AppState } from '@shared/types'
 import { Keys } from '../components/ui'
 import { api } from '../lib/store'
 
 const lessons = [
-  { id: 'tap', title: 'Tap to record', instruction: 'Tap Control–Space, say a sentence, then tap it again to finish.', example: 'Try: “Remind me to review the design tomorrow.”' },
-  { id: 'hold', title: 'Hold to talk', instruction: 'Hold Control–Space for at least 1.2 seconds. Watch the rail fill, speak, then release to finish.', example: 'The island changes to “Release to finish” when hold-to-talk is ready.' },
-  { id: 'edit', title: 'Edit by voice', instruction: 'Select the sentence below, tap Control–Space and say “make this shorter”. Tap again to finish.', example: 'Your selection is rewritten using your instruction.' }
+  { id: 'tap', title: 'Tap to record', instruction: (key: string) => `Tap ${key}, say a sentence, then tap it again to finish.`, example: 'Try: “Remind me to review the design tomorrow.”' },
+  { id: 'hold', title: 'Hold to talk', instruction: (key: string) => `Hold ${key} for at least 1.2 seconds. Watch the rail fill, speak, then release to finish.`, example: 'The island changes to “Release to finish” when hold-to-talk is ready.' },
+  { id: 'edit', title: 'Edit by voice', instruction: (key: string) => `Select the sentence below, tap ${key} and say “make this shorter”. Tap again to finish.`, example: 'Your selection is rewritten using your instruction.' }
 ] as const
 type Lesson = typeof lessons[number]['id']
 const sample = 'I wanted to let you know that I will be available to meet tomorrow afternoon to discuss the design.'
@@ -21,6 +22,7 @@ export function PracticeView({ state }: { state: AppState }) {
   const recording = state.phase === 'recording'
   const busy = state.phase !== 'ready' && !recording
   const current = lessons.find((item) => item.id === lesson)!
+  const { shortcuts } = state.settings
   useEffect(() => { field.current?.focus() }, [])
   useEffect(() => {
     const pending = pendingSelect.current
@@ -68,7 +70,7 @@ export function PracticeView({ state }: { state: AppState }) {
       </button>)}
     </div>
     <section id="practice-panel" role="tabpanel" aria-labelledby={`lesson-${lesson}`}>
-      <h2>{current.title}</h2><p className="practice-instruction">{current.instruction}</p><p className="practice-example">{current.example}</p>
+      <h2>{current.title}</h2><p className="practice-instruction">{current.instruction(shortcutName(shortcuts.dictate))}</p><p className="practice-example">{current.example}</p>
       {lesson === 'edit' && !state.settings.voiceEdits && <div className="practice-enable">Voice editing is turned off. <button type="button" className="btn ghost" onClick={() => void api.setSettings({ voiceEdits: true })}>Enable voice editing</button></div>}
       <label className="practice-label" htmlFor="practice-editor">Your practice text<span>{lesson === 'edit' && selected ? 'Selection ready for voice editing' : 'Click here, then use the shortcut'}</span></label>
       <textarea id="practice-editor" data-practice="true" ref={field} value={text} onChange={(event) => setText(event.target.value)}
@@ -77,7 +79,7 @@ export function PracticeView({ state }: { state: AppState }) {
       <div className="practice-toolbar">
         <button type="button" className={`btn ${recording ? 'secondary' : 'primary'}`} disabled={busy} onMouseDown={(event) => event.preventDefault()}
           onClick={() => { field.current?.focus(); api.toggleRecording() }}>
-          {recording ? <Square size={12} /> : <Mic size={14} />}{recording ? 'Finish dictation' : 'Try dictation'}<Keys keys={['⌃', 'Space']} small />
+          {recording ? <Square size={12} /> : <Mic size={14} />}{recording ? 'Finish dictation' : 'Try dictation'}<Keys keys={shortcutKeys(shortcuts.dictate)} small />
         </button>
         <button type="button" className="btn ghost" disabled={state.phase !== 'ready' || !text} onClick={() => { setText(''); field.current?.focus() }}><RotateCcw size={13} />Clear text</button>
         {recording && <button type="button" className="btn ghost" onClick={() => api.cancelRecording()}>Cancel <Keys keys={['esc']} small /></button>}
@@ -86,7 +88,7 @@ export function PracticeView({ state }: { state: AppState }) {
         : state.practiceCompleted.includes(lesson) ? <><Check size={14} />{current.title} completed. Try another lesson or keep practising.</>
           : lesson === 'edit' && !selected ? 'Select some text to tell Dictait what to rewrite.' : 'Ready when you are.'}</div>
       {!state.settings.autoPaste && <p className="practice-note">Automatic paste is off. After dictating, focus the practice box and press ⌘V to insert your words.</p>}
-      <p id="practice-privacy" className="practice-note">Practice dictations aren’t saved to Notes or memory. The text box clears when you leave. Your last dictation is still available with <Keys keys={['⌃', '⌥', 'V']} small />.</p>
+      <p id="practice-privacy" className="practice-note">Practice dictations aren’t saved to Notes or memory. The text box clears when you leave. Your last dictation is still available with <Keys keys={shortcutKeys(shortcuts.pasteLast)} small />.</p>
     </section>
   </div></div>
 }

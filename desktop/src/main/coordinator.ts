@@ -9,8 +9,12 @@ import {
   HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, type AppState, type HistoryEntry, type Microphone, type Phase, type RecorderOptions,
   type CorrectionDraft, type Destination, type Settings, type Suggestion, type Tones, type UpdateStatus, type VocabularyEntry, type WordResult
 } from '@shared/types'
+import {
+  ACTION_NAMES, checkShortcut, DEFAULT_SHORTCUTS, sameShortcut, shortcutAccelerator, shortcutName,
+  type ShortcutAction, type Shortcuts
+} from '@shared/shortcuts'
 import { readArchive } from './archive'
-import { NativeHelper, type FocusInfo } from './helper'
+import { NativeHelper, type FocusInfo, type HotKeySpec, type MediaHold } from './helper'
 import { loadPersonal, newID, savePersonal, type Personalization } from './personal'
 import { SUPPORT } from './paths'
 import { loadSettings, saveSettings, type Stored } from './settings'
@@ -36,8 +40,6 @@ export interface LiveState {
   microphone: string
   micQuiet: boolean
 }
-
-const SPACE = 49, KEY_V = 9, KEY_L = 37
 
 /** Valid 44-byte 16 kHz mono 16-bit PCM WAV with 0 samples, used to finalize an already-chunked session. */
 function emptyWAV(): Buffer {
@@ -132,6 +134,17 @@ export class Coordinator extends EventEmitter {
   private recordingWasHold = false
   /** The last dictation pasted where it started, for spoken follow-ups. */
   private lastPasted: { text: string; at: number } | null = null
+  /** Shortcuts registered with Electron because the native helper did not answer, by action. */
+  private fallbacks = new Map<ShortcutAction, string>()
+  /** Shortcuts are off while the window records a new one; this timer turns them back on. */
+  private capturing: NodeJS.Timeout | null = null
+  private shortcutNotice = ''
+  /** The current recording's volume or playback change, resolved with how to undo it. */
+  private mediaHold: Promise<MediaHold | null> | null = null
+  /** Media requests run one after another, so a quick restart never saves an already lowered volume. */
+  private mediaQueue: Promise<unknown> = Promise.resolve()
+  /** A change made and not yet undone, for undoing it synchronously while quitting. */
+  private mediaHeld: MediaHold | null = null
 
   constructor() {
     super()
@@ -148,13 +161,19 @@ export class Coordinator extends EventEmitter {
 
   get settings(): Settings {
     const { backend, language, cleanup, autoPaste, smartFormatting, writingStyle, memoryMode, learnCorrections, appearance,
-      useContext, voiceEdits, appTones, tones, microphone, setupDone, autoUpdate, feedbackSounds } = this.stored
+      useContext, voiceEdits, appTones, tones, microphone, setupDone, autoUpdate, feedbackSounds, shortcuts, whileRecording } = this.stored
     return { backend, language, cleanup, autoPaste, smartFormatting, writingStyle, memoryMode, learnCorrections, appearance,
-      useContext, voiceEdits, appTones, tones: { ...tones }, microphone, setupDone, autoUpdate, feedbackSounds }
+      useContext, voiceEdits, appTones, tones: { ...tones }, microphone, setupDone, autoUpdate, feedbackSounds, shortcuts: { ...shortcuts }, whileRecording }
+  }
+
+  /** “Control–Space”, “Right Command”: the dictation shortcut, for messages. */
+  get shortcutName(): string {
+    return shortcutName(this.stored.shortcuts.dictate)
   }
 
   start(): void {
     this.helper.on('hotkey', (name: string, down: boolean, focus: FocusInfo | null, at: number) => this.hotkey(name, down, focus, at))
+    this.helper.on('hotkey-cancel', (name: string) => this.hotkeyCancelled(name))
     this.helper.on('disconnected', () => {
       this.pressedAt = 0
       this.pressStarted = false
@@ -231,30 +250,105 @@ export class Coordinator extends EventEmitter {
 
   // MARK: Shortcuts
 
-  /** Control–Space (tap or hold) and Control–Option–V, through the native helper; Electron as a fallback. */
-  async registerShortcut(): Promise<void> {
-    for (const accelerator of ['Control+Space', 'Control+Alt+V', 'Control+Alt+L']) {
+  /** The configured shortcuts (tap or hold to dictate), through the native helper; Electron as a fallback. */
+  async registerShortcut(): Promise<Record<string, boolean>> {
+    if (this.capturing) return {}
+    this.dropFallbacks()
+    const { shortcuts } = this.stored
+    const registered = await this.helper.registerHotkeys(hotkeySpecs(shortcuts))
+    if (this.capturing) return registered
+    // If the native helper is unavailable (no answer for a shortcut), register Electron fallbacks.
+    // A shortcut the helper could not register is taken, and Electron would fail the same way.
+    const run: Record<ShortcutAction, () => void> = {
+      dictate: () => this.toggleRecording(), pasteLast: () => void this.pasteLast(), learnCorrection: () => void this.previewCorrection(null, true)
+    }
+    for (const action of Object.keys(run) as ShortcutAction[]) {
+      const accelerator = shortcutAccelerator(shortcuts[action])
+      if (action in registered || !accelerator) continue
+      try { if (globalShortcut.register(accelerator, run[action])) this.fallbacks.set(action, accelerator) } catch { /* unsupported key */ }
+    }
+    this.applyHotkeyStatus(registered)
+    return registered
+  }
+
+  private dropFallbacks(): void {
+    for (const accelerator of this.fallbacks.values()) {
       if (globalShortcut.isRegistered(accelerator)) globalShortcut.unregister(accelerator)
     }
-    const registered = await this.helper.registerHotkeys([
-      { name: 'dictate', code: SPACE, modifiers: ['control'] },
-      { name: 'pasteLast', code: KEY_V, modifiers: ['control', 'option'] },
-      { name: 'learnCorrection', code: KEY_L, modifiers: ['control', 'option'] }
-    ])
-    // If the native helper is unavailable (empty reply) or missed a shortcut, register Electron fallbacks.
-    if (!('dictate' in registered)) globalShortcut.register('Control+Space', () => this.toggleRecording())
-    if (!registered.pasteLast && !('pasteLast' in registered)) globalShortcut.register('Control+Alt+V', () => void this.pasteLast())
-    if (!registered.learnCorrection && !('learnCorrection' in registered)) globalShortcut.register('Control+Alt+L', () => void this.previewCorrection(null, true))
-    this.applyHotkeyStatus(registered)
+    this.fallbacks.clear()
   }
 
   private applyHotkeyStatus(registered: Record<string, boolean>): void {
-    const ok = registered.dictate === true || globalShortcut.isRegistered('Control+Space')
+    if (this.capturing) return
+    const dictate = this.stored.shortcuts.dictate
+    const ok = registered.dictate === true || this.fallbacks.has('dictate')
+    const advice = !ok ? dictate.kind === 'modifier'
+      ? `Dictait can’t watch ${this.shortcutName}. Allow Dictait in Privacy & Security → Accessibility, then click Retry shortcut.`
+      : sameShortcut(dictate, DEFAULT_SHORTCUTS.dictate)
+        ? 'Control–Space is in use. Choose another shortcut in Settings, or in Keyboard → Keyboard Shortcuts → Input Sources, turn off that shortcut, then click Retry shortcut.'
+        : `${this.shortcutName} is in use by macOS or another app. Choose another shortcut in Settings.`
+      : ''
     let notice = this.state.notice
-    if (!ok) notice = 'Control–Space is in use. In Keyboard → Keyboard Shortcuts → Input Sources, disable or change that shortcut, then click Retry shortcut.'
-    else if (notice.startsWith('Control–Space is in use')) notice = ''
-    this.update({ shortcutRegistered: ok, notice, correctionShortcutRegistered: registered.learnCorrection === true || globalShortcut.isRegistered('Control+Alt+L') })
+    if (this.shortcutNotice && notice === this.shortcutNotice) notice = ''
+    if (advice) notice = advice
+    this.shortcutNotice = advice
+    this.update({ shortcutRegistered: ok, notice, correctionShortcutRegistered: registered.learnCorrection === true || this.fallbacks.has('learnCorrection') })
     this.writeDiagnostics()
+  }
+
+  /** Change one shortcut. One that macOS or another app already owns is refused, keeping the old one. */
+  async setShortcut(action: ShortcutAction, value: unknown): Promise<WordResult> {
+    if (!(action in DEFAULT_SHORTCUTS)) return { ok: false, feedback: 'Unknown shortcut.' }
+    const checked = checkShortcut(value, action === 'dictate')
+    if ('error' in checked) return { ok: false, feedback: checked.error }
+    const { shortcut } = checked
+    const previous = this.stored.shortcuts[action]
+    const clash = (Object.keys(this.stored.shortcuts) as ShortcutAction[])
+      .find((other) => other !== action && sameShortcut(this.stored.shortcuts[other], shortcut))
+    if (clash) return { ok: false, feedback: `${shortcutName(shortcut)} is already set for “${ACTION_NAMES[clash]}”.` }
+    if (this.capturing) { clearTimeout(this.capturing); this.capturing = null }
+    const apply = (next: Shortcuts) => {
+      this.store({ shortcuts: next })
+      this.update({ settings: this.settings })
+    }
+    apply({ ...this.stored.shortcuts, [action]: shortcut })
+    const registered = await this.registerShortcut()
+    if (registered[action] === true || this.fallbacks.has(action)) {
+      this.emit('settings', { shortcuts: this.stored.shortcuts })
+      return { ok: true, feedback: '' }
+    }
+    apply({ ...this.stored.shortcuts, [action]: previous })
+    await this.registerShortcut()
+    return { ok: false, feedback: shortcut.kind === 'modifier'
+      ? `Dictait can’t watch ${shortcutName(shortcut)} yet. Allow Dictait in Privacy & Security → Accessibility.`
+      : `${shortcutName(shortcut)} is already used by macOS or another app. Try a different one.` }
+  }
+
+  /** While the window records a new shortcut, the current ones must not fire or swallow the keys. */
+  captureShortcut(active: boolean): void {
+    if (active) {
+      if (this.capturing) clearTimeout(this.capturing)
+      // Back on after 30 seconds even if the window never reports back.
+      this.capturing = setTimeout(() => this.captureShortcut(false), 30_000)
+      this.dropFallbacks()
+      void this.helper.registerHotkeys([])
+      return
+    }
+    if (!this.capturing) return
+    clearTimeout(this.capturing)
+    this.capturing = null
+    void this.registerShortcut()
+  }
+
+  /** A lone modifier turned out to be part of a shortcut such as ⌘C: undo the start it caused. */
+  private hotkeyCancelled(name: string): void {
+    if (name !== 'dictate') return
+    if (this.holdTimer) clearTimeout(this.holdTimer)
+    const started = this.pressStarted
+    this.pressedAt = 0
+    this.pressStarted = false
+    this.setLive({ holding: false, holdStartedAt: null })
+    if (started && this.state.phase === 'recording') this.cancelRecording()
   }
 
   /** Tap to start, tap to finish; or hold while talking and let go to finish. */
@@ -348,9 +442,10 @@ export class Coordinator extends EventEmitter {
     this.setLive({ live: '', note: '', holding: false, holdStartedAt: null, editing: false, appName: '',
       deliveredTo: null, microphone: '', micQuiet: false })
     this.state.recordingStartedAt = startedAt
-    this.setPhase('recording', 'Control–Space to finish. Escape to cancel.')
+    this.setPhase('recording', `${this.shortcutName} to finish. Escape to cancel.`)
     globalShortcut.register('Escape', () => this.cancelRecording())
     if (this.stored.feedbackSounds) playSound('Tink')
+    this.holdMedia()
     // Look at where the user is while the microphone opens; neither waits for the other.
     try {
       if (!this.recorder) throw new Error('The recorder is not ready yet.')
@@ -467,6 +562,7 @@ export class Coordinator extends EventEmitter {
   }
 
   private endRecordingSession(): void {
+    this.releaseMedia()
     if (this.ticker) clearInterval(this.ticker)
     this.ticker = null
     if (this.holdTimer) clearTimeout(this.holdTimer)
@@ -484,7 +580,31 @@ export class Coordinator extends EventEmitter {
     this.recorder?.cancel()
     this.discardSession()
     this.deletePendingAudio()
-    this.setPhase('ready', 'Recording cancelled. Control–Space to try again.')
+    this.setPhase('ready', `Recording cancelled. ${this.shortcutName} to try again.`)
+  }
+
+  /** Lower or pause other audio for this recording; every way a recording ends calls releaseMedia. */
+  private holdMedia(): void {
+    const mode = this.stored.whileRecording
+    if (mode === 'keep' || this.mediaHold) return
+    const hold = this.mediaQueue
+      .then(() => this.helper.media(mode === 'duck' ? 'duck' : 'pause'))
+      .catch(() => null)
+      .then((value) => { this.mediaHeld = value; return value })
+    this.mediaHold = hold
+    this.mediaQueue = hold
+  }
+
+  /** Restore the volume or resume playback, once the change has been made. */
+  private releaseMedia(): void {
+    const hold = this.mediaHold
+    if (!hold) return
+    this.mediaHold = null
+    this.mediaQueue = hold.then(async (value) => {
+      if (!value || this.mediaHeld !== value) return
+      this.mediaHeld = null
+      await this.helper.releaseMedia(value)
+    }).catch(() => { /* helper gone; nothing else to undo */ })
   }
 
   private discardSession(): void {
@@ -604,7 +724,7 @@ export class Coordinator extends EventEmitter {
         this.cleanupAvailable = Boolean(event.cleanup)
         const memory = event.memory as { terms?: number } | undefined
         this.update({ notice: typeof event.warning === 'string' ? event.warning : this.state.notice, rememberedTerms: memory?.terms ?? 0, download: null })
-        this.setPhase('ready', 'Control–Space to start. Press again to finish.')
+        this.setPhase('ready', `${this.shortcutName} to start. Press again to finish.`)
         break
       }
       case 'partial':
@@ -652,7 +772,7 @@ export class Coordinator extends EventEmitter {
             this.update({ notice: 'Enable Dictait in Privacy & Security → Accessibility to paste automatically. Your text is on the clipboard.' })
           }
           const done = edit ? 'Replaced.' : followed ? `Pasted, following your instruction${followed > 1 ? 's' : ''}.` : 'Pasted.'
-          this.setPhase('ready', outcome === 'pasted' ? `${done} Control–Space to dictate again.`
+          this.setPhase('ready', outcome === 'pasted' ? `${done} ${this.shortcutName} to dictate again.`
             : outcome === 'no-target' ? 'Copied. No text box is focused, so press Command–V where you want it.'
               : 'Copied. Press Command–V to paste.')
           this.emit('archive')
@@ -754,13 +874,13 @@ export class Coordinator extends EventEmitter {
       if (outcome === 'gone') {
         const delivered = await this.deliver(text)
         if (this.deliveryStale(delivery)) return
-        this.setPhase('ready', delivered === 'pasted' ? 'Pasted at your current cursor. Control–Space to dictate again.'
+        this.setPhase('ready', delivered === 'pasted' ? `Pasted at your current cursor. ${this.shortcutName} to dictate again.`
           : 'Copied the new version. Press Command–V where you want it.')
         this.emit('archive')
         return
       }
       if (outcome !== 'replaced') await this.copyText(text)
-      this.setPhase('ready', outcome === 'replaced' ? 'Updated your last dictation. Control–Space to dictate again.'
+      this.setPhase('ready', outcome === 'replaced' ? `Updated your last dictation. ${this.shortcutName} to dictate again.`
         : outcome === 'changed' ? 'That text has changed since, so the new version is on the clipboard. Press Command–V to use it.'
           : 'Copied the new version. Press Command–V where you want it.')
       this.emit('archive')
@@ -780,7 +900,7 @@ export class Coordinator extends EventEmitter {
     return focus?.editable === true ? 'text' : focus?.editable === false ? 'none' : 'unknown'
   }
 
-  /** Control–Option–V or the menu: put a recent dictation where the cursor is. */
+  /** The paste-last shortcut or the menu: put a recent dictation where the cursor is. */
   async pasteLast(index = 0): Promise<void> {
     if (this.state.phase !== 'ready') return
     const entry = this.state.history[index]
@@ -795,13 +915,17 @@ export class Coordinator extends EventEmitter {
 
   refreshPermissions(): void {
     const login = app.getLoginItemSettings()
+    const accessibility = systemPreferences.isTrustedAccessibilityClient(false)
+    // A lone-modifier shortcut is watched with Accessibility; listen again once it is granted.
+    const granted = accessibility && !this.state.accessibilityAllowed && this.stored.shortcuts.dictate.kind === 'modifier'
     this.update({
       microphoneAllowed: systemPreferences.getMediaAccessStatus('microphone') === 'granted',
-      accessibilityAllowed: systemPreferences.isTrustedAccessibilityClient(false),
+      accessibilityAllowed: accessibility,
       launchAtLogin: login.status ? login.status === 'enabled' : login.openAtLogin,
       loginNeedsApproval: login.status === 'requires-approval'
     })
     this.writeDiagnostics()
+    if (granted) void this.registerShortcut()
   }
 
   requestMicrophone(): void {
@@ -857,7 +981,7 @@ export class Coordinator extends EventEmitter {
     return this.openCorrectionPreview(corrected, false).feedback
   }
 
-  /** Select corrected text in any app and press Control–Option–L. */
+  /** Select corrected text in any app and press the correction shortcut (Control–Option–L by default). */
   async previewCorrection(captured: FocusInfo | null = null, fromShortcut = false): Promise<WordResult> {
     if (this.state.phase !== 'ready') {
       const feedback = 'Finish dictating before reviewing a correction.'
@@ -876,8 +1000,9 @@ export class Coordinator extends EventEmitter {
       return { ok: false, feedback: message }
     }
     if (this.state.phase !== 'ready') return fail('Finish dictating before reviewing a correction.')
-    if (!this.state.transcript) return fail('Dictate a sentence first, then select your corrected version and press Control–Option–L.')
-    if (!corrected) return fail('Select your corrected dictation and press Control–Option–L, or copy it and use Review from clipboard in Settings.')
+    const keys = shortcutName(this.stored.shortcuts.learnCorrection)
+    if (!this.state.transcript) return fail(`Dictate a sentence first, then select your corrected version and press ${keys}.`)
+    if (!corrected) return fail(`Select your corrected dictation and press ${keys}, or copy it and use Review from clipboard in Settings.`)
     if (corrected === this.state.transcript.trim()) return fail('Nothing changed, so there is nothing to learn.')
     if (corrected.length > 1000) return fail('Review a shorter correction, up to 1,000 characters.')
     this.stopMicrophoneTest()
@@ -1011,6 +1136,9 @@ export class Coordinator extends EventEmitter {
     this.clearWatchdog()
     this.recordingToken++
     this.endRecordingSession()
+    // The helper stops below, before an asynchronous restore could reach it.
+    if (this.mediaHeld) { this.helper.releaseMediaNow(this.mediaHeld); this.mediaHeld = null }
+    if (this.capturing) clearTimeout(this.capturing)
     this.recorder?.cancel()
     this.deletePendingAudio()
     globalShortcut.unregisterAll()
@@ -1046,6 +1174,16 @@ export function changedWords(original: string, corrected: string): [string, stri
   }
   gapA.push(...a.slice(i)); gapB.push(...b.slice(j)); flush()
   return pairs
+}
+
+/** Chords for Carbon; a lone modifier for the helper's flagsChanged monitor. */
+function hotkeySpecs(shortcuts: Shortcuts): HotKeySpec[] {
+  return (Object.keys(shortcuts) as ShortcutAction[]).map((name) => {
+    const shortcut = shortcuts[name]
+    return shortcut.kind === 'modifier'
+      ? { name, modifierKey: shortcut.key, holdMs: HOLD_TO_TALK_MS }
+      : { name, code: shortcut.code, modifiers: shortcut.modifiers }
+  })
 }
 
 export function openPrivacy(anchor: string): void {

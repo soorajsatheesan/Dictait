@@ -1,5 +1,6 @@
 import { app, ipcMain, Menu, nativeTheme, session, shell, type MenuItemConstructorOptions } from 'electron'
 import { join } from 'node:path'
+import type { ShortcutAction } from '@shared/shortcuts'
 import type { Appearance, Section, Settings, Tones, VocabularyEntry } from '@shared/types'
 import { readArchive } from './archive'
 import { Coordinator, openPrivacy } from './coordinator'
@@ -145,6 +146,10 @@ function registerIPC(model: Coordinator, desktop: DesktopWindow, updater: Update
   ipcMain.handle('login:set', (_event, enabled: boolean) => model.setLaunchAtLogin(Boolean(enabled)))
   ipcMain.on('login:open', () => void shell.openExternal('x-apple.systempreferences:com.apple.LoginItems-Settings.extension'))
   ipcMain.on('shortcut:retry', () => void model.registerShortcut())
+  ipcMain.handle('shortcut:set', (_event, action: unknown, shortcut: unknown) =>
+    typeof action === 'string' && ['dictate', 'pasteLast', 'learnCorrection'].includes(action)
+      ? model.setShortcut(action as ShortcutAction, shortcut) : { ok: false, feedback: 'Unknown shortcut.' })
+  ipcMain.on('shortcut:capture', (_event, active: unknown) => model.captureShortcut(active === true))
   ipcMain.on('permission:microphone', () => model.requestMicrophone())
   ipcMain.on('permission:accessibility', () => model.requestAccessibility())
   ipcMain.on('permission:open', (_event, anchor: string) => { if (PRIVACY_ANCHORS.has(String(anchor))) openPrivacy(String(anchor)) })
@@ -182,6 +187,7 @@ function sanitize(patch: Partial<Settings>): Partial<Settings> {
   pick('language', oneOf('auto', 'en', 'hi'))
   pick('memoryMode', oneOf('notes', 'terms', 'off'))
   pick('appearance', oneOf('system', 'light', 'dark'))
+  pick('whileRecording', oneOf('keep', 'duck', 'pause'))
   pick('cleanup', flag); pick('autoPaste', flag); pick('smartFormatting', flag); pick('learnCorrections', flag)
   pick('setupDone', flag); pick('autoUpdate', flag)
   pick('feedbackSounds', flag)

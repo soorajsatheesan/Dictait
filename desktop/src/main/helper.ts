@@ -1,6 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { paths } from './paths'
+import type { ModifierKey } from '@shared/shortcuts'
 import type { Destination } from '@shared/types'
 
 export interface FocusInfo {
@@ -25,12 +26,20 @@ export interface InputDevice {
   default: boolean
 }
 
-export interface HotKeySpec {
+export type HotKeySpec = {
   name: string
   /** macOS virtual key code, e.g. 49 for Space. */
   code: number
   modifiers: ('control' | 'option' | 'shift' | 'command')[]
+} | {
+  name: string
+  /** A modifier used on its own; the helper reports it like a chord's press and release. */
+  modifierKey: ModifierKey
+  holdMs: number
 }
+
+/** How to undo a media change: returned by the helper and sent back unchanged. */
+export type MediaHold = Record<string, unknown>
 
 /**
  * The persistent native companion (native/helper.swift): shortcuts with press and release,
@@ -83,6 +92,8 @@ export class NativeHelper extends EventEmitter {
 
   private receive(message: Record<string, unknown>): void {
     if (message.event === 'hotkey') {
+      // A lone modifier that turned out to be part of a shortcut such as ⌘C.
+      if (message.state === 'cancel') { this.emit('hotkey-cancel', String(message.name)); return }
       this.emit('hotkey', String(message.name), message.state === 'down', parseFocus(message.focus),
         typeof message.at === 'number' ? message.at : Date.now())
       return
@@ -147,6 +158,21 @@ export class NativeHelper extends EventEmitter {
   async inputs(): Promise<InputDevice[]> {
     const reply = await this.request('inputs', {}, 1500)
     return Array.isArray(reply.devices) ? (reply.devices as InputDevice[]) : []
+  }
+
+  /** Lowers the volume or pauses media; resolves with how to undo it, or null if nothing changed. */
+  async media(action: 'duck' | 'pause'): Promise<MediaHold | null> {
+    const reply = await this.request('media', { action }, action === 'pause' ? 4000 : 2000)
+    return reply.ok === true && reply.hold && typeof reply.hold === 'object' ? reply.hold as MediaHold : null
+  }
+
+  async releaseMedia(hold: MediaHold): Promise<boolean> {
+    return (await this.request('media', hold, 3000)).ok === true
+  }
+
+  /** While quitting, when the serving helper is about to stop. */
+  releaseMediaNow(hold: MediaHold): void {
+    try { execFileSync(paths.helper, ['media', JSON.stringify(hold)], { timeout: 3000, stdio: 'ignore' }) } catch { /* best effort */ }
   }
 
   stop(): void {

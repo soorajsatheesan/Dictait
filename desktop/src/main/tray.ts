@@ -1,4 +1,5 @@
 import { app, Menu, nativeImage, shell, Tray, type MenuItemConstructorOptions } from 'electron'
+import { DEFAULT_SHORTCUTS, shortcutAccelerator, shortcutName } from '@shared/shortcuts'
 import type { HistoryEntry, Phase } from '@shared/types'
 import { readRecentSavedDictations } from './archive'
 import type { Coordinator } from './coordinator'
@@ -38,7 +39,7 @@ export class StatusMenu {
     const icon = phase === 'recording' ? this.icons.recording : phase === 'failed' ? this.icons.alert
       : ['preparing', 'transcribing', 'cleaning'].includes(phase) ? this.icons.busy : this.icons.idle
     this.tray.setImage(icon)
-    this.tray.setToolTip(`Dictait · ${titles[phase]} · Control–Space`)
+    this.tray.setToolTip(`Dictait · ${titles[phase]} · ${shortcutName(this.model.stored.shortcuts?.dictate ?? DEFAULT_SHORTCUTS.dictate)}`)
   }
 
   private async open(): Promise<void> {
@@ -52,6 +53,9 @@ export class StatusMenu {
     const model = this.model, state = model.state, settings = model.stored
     const editable = ['ready', 'failed'].includes(state.phase)
     const set = (patch: Parameters<Coordinator['setSettings']>[0]) => () => model.setSettings(patch)
+    const shortcuts = settings.shortcuts ?? DEFAULT_SHORTCUTS
+    // Shown in the menu only; the helper owns the real shortcuts. A lone modifier has no menu form.
+    const accelerator = (value: string | null) => value ? { accelerator: value, registerAccelerator: false } : {}
     const items: MenuItemConstructorOptions[] = [
       { label: titles[state.phase], enabled: false },
       { label: clip(state.message, 90), enabled: false }
@@ -74,7 +78,7 @@ export class StatusMenu {
       { label: 'Settings…', click: () => this.desktop.show('settings') },
       { label: 'Practice dictation…', click: () => this.desktop.show('practice') },
       {
-        label: state.phase === 'recording' ? 'Finish dictation' : 'Start dictation', accelerator: 'Control+Space', registerAccelerator: false,
+        label: state.phase === 'recording' ? 'Finish dictation' : 'Start dictation', ...accelerator(shortcutAccelerator(shortcuts.dictate)),
         enabled: ['ready', 'recording'].includes(state.phase), click: () => model.toggleRecording()
       }
     )
@@ -86,7 +90,7 @@ export class StatusMenu {
     if (state.history.length) {
       const canPaste = state.phase === 'ready'
       items.push(
-        { label: 'Paste last dictation', accelerator: 'Control+Alt+V', registerAccelerator: false, enabled: canPaste, click: () => void model.pasteLast() },
+        { label: 'Paste last dictation', ...accelerator(shortcutAccelerator(shortcuts.pasteLast)), enabled: canPaste, click: () => void model.pasteLast() },
         {
           label: 'Recent dictations', enabled: canPaste, submenu: state.history.map((entry, index) => ({
             label: entry.text.replace(/\s+/g, ' ').slice(0, 60) + (entry.text.length > 60 ? '…' : ''),

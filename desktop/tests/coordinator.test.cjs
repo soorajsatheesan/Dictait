@@ -51,6 +51,12 @@ function fixture(t, spawnWorker) {
   model.helper.deliver = async () => { pasteCount++; return 'pasted' }
   model.helper.replaceLast = async () => 'gone'
   model.worker.send = () => {}
+  // Media changes in order: 'duck' | 'pause' when held, then the hold's action when released.
+  const media = []
+  model.helper.media = async (action) => { media.push(action); return { action: action === 'duck' ? 'restore' : 'resume', volume: 0.5 } }
+  model.helper.releaseMedia = async (hold) => { media.push(hold.action); return true }
+  const registrations = []
+  model.helper.registerHotkeys = async (keys) => { registrations.push(keys); return Object.fromEntries(keys.map((key) => [key.name, true])) }
   let starts = 0, stops = 0
   model.recorder = { start: async () => { starts++ }, stop: async () => { stops++; return null }, cancel() {} }
   const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
@@ -67,7 +73,7 @@ function fixture(t, spawnWorker) {
     now = end
   }
   t.after(() => { timers.clear() })
-  return { model, flush, advance, files, sounds, electron, starts: () => starts, stops: () => stops, pasteCount: () => pasteCount }
+  return { model, flush, advance, files, sounds, electron, media, registrations, starts: () => starts, stops: () => stops, pasteCount: () => pasteCount }
 }
 
 test('initial warm-up starts the worker and rapid retries launch only the latest configuration', async (t) => {
@@ -421,4 +427,155 @@ test('failed correction shortcut notifies visibly', async (t) => {
   const res = await f.model.previewCorrection({ selected: '', secure: false }, true)
   assert.equal(res.ok, false)
   assert.equal(notices.length, 1)
+})
+
+test('media is left alone by default', async (t) => {
+  const f = fixture(t)
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  f.model.cancelRecording()
+  await f.flush()
+  assert.deepEqual(f.media, [])
+})
+
+test('lowered volume comes back when a dictation finishes', async (t) => {
+  const f = fixture(t)
+  f.model.stored.whileRecording = 'duck'
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  assert.deepEqual(f.media, ['duck'])
+  f.advance(600)
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  assert.deepEqual(f.media, ['duck', 'restore'])
+})
+
+test('paused media resumes on cancel, microphone failure and worker errors', async (t) => {
+  const f = fixture(t)
+  f.model.stored.whileRecording = 'pause'
+  f.model.toggleRecording()
+  await f.flush()
+  f.model.cancelRecording()
+  await f.flush()
+  assert.deepEqual(f.media, ['pause', 'resume'])
+
+  f.model.recorder.start = async () => { throw new Error('No microphone') }
+  f.advance(300)
+  f.model.toggleRecording()
+  await f.flush()
+  assert.equal(f.model.state.phase, 'ready')
+  assert.deepEqual(f.media.slice(2), ['pause', 'resume'])
+
+  f.model.recorder.start = async () => {}
+  f.advance(300)
+  f.model.toggleRecording()
+  await f.flush()
+  f.model.handle({ event: 'error', message: 'Worker stopped' })
+  await f.flush()
+  assert.equal(f.model.state.phase, 'failed')
+  assert.deepEqual(f.media.slice(4), ['pause', 'resume'])
+})
+
+test('a quick second recording waits for the first volume restore', async (t) => {
+  const f = fixture(t)
+  f.model.stored.whileRecording = 'duck'
+  let answer
+  f.model.helper.media = (action) => { f.media.push(action); return new Promise((resolve) => { answer = resolve }) }
+  f.model.toggleRecording()
+  await f.flush()
+  f.model.cancelRecording()
+  f.advance(300)
+  f.model.toggleRecording()
+  await f.flush()
+  // The second duck must not read the lowered volume as the level to restore.
+  assert.deepEqual(f.media, ['duck'])
+  answer({ action: 'restore', volume: 0.5 })
+  await f.flush()
+  assert.deepEqual(f.media, ['duck', 'restore', 'duck'])
+  f.model.cancelRecording()
+})
+
+test('nothing is resumed when nothing was paused', async (t) => {
+  const f = fixture(t)
+  f.model.stored.whileRecording = 'pause'
+  f.model.helper.media = async (action) => { f.media.push(action); return null }
+  f.model.toggleRecording()
+  await f.flush()
+  f.model.cancelRecording()
+  await f.flush()
+  assert.deepEqual(f.media, ['pause'])
+})
+
+test('a single-modifier trigger registers with the helper and names itself in messages', async (t) => {
+  const f = fixture(t)
+  const result = await f.model.setShortcut('dictate', { kind: 'modifier', key: 'rightCommand' })
+  assert.equal(result.ok, true)
+  const spec = f.registrations.at(-1).find((key) => key.name === 'dictate')
+  assert.deepEqual({ ...spec }, { name: 'dictate', modifierKey: 'rightCommand', holdMs: 1200 })
+  assert.equal(f.model.state.settings.shortcuts.dictate.key, 'rightCommand')
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  assert.match(f.model.state.message, /^Right Command to finish/)
+  f.model.cancelRecording()
+})
+
+test('a modifier that became ⌘-something cancels the recording it started', async (t) => {
+  const f = fixture(t)
+  f.model.hotkey('dictate', true)
+  await f.flush()
+  assert.equal(f.model.state.phase, 'recording')
+  f.model.hotkeyCancelled('dictate')
+  assert.equal(f.model.state.phase, 'ready')
+  assert.equal(f.model.live.holdStartedAt, null)
+  // A cancel after a press that stopped a recording leaves the result alone.
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  f.advance(600)
+  f.model.hotkey('dictate', true)
+  await f.flush()
+  f.model.hotkeyCancelled('dictate')
+  assert.equal(f.model.state.phase, 'ready')
+  assert.equal(f.stops(), 1)
+})
+
+test('shortcut changes refuse clashes, unusable chords and chords another app owns', async (t) => {
+  const f = fixture(t)
+  const clash = await f.model.setShortcut('dictate', { kind: 'chord', code: 9, modifiers: ['option', 'control'] })
+  assert.equal(clash.ok, false)
+  assert.match(clash.feedback, /Paste last dictation/)
+  assert.equal((await f.model.setShortcut('dictate', { kind: 'chord', code: 2, modifiers: ['option'] })).ok, false)
+  assert.equal((await f.model.setShortcut('pasteLast', { kind: 'modifier', key: 'fn' })).ok, false)
+
+  f.model.helper.registerHotkeys = async (keys) => {
+    f.registrations.push(keys)
+    return Object.fromEntries(keys.map((key) => [key.name, !(key.name === 'dictate' && key.code === 2)]))
+  }
+  const taken = await f.model.setShortcut('dictate', { kind: 'chord', code: 2, modifiers: ['control', 'option'] })
+  assert.equal(taken.ok, false)
+  assert.match(taken.feedback, /Control–Option–D is already used/)
+  assert.deepEqual({ ...f.model.stored.shortcuts.dictate, modifiers: [...f.model.stored.shortcuts.dictate.modifiers] },
+    { kind: 'chord', code: 49, modifiers: ['control'] })
+  assert.equal(f.model.state.shortcutRegistered, true)
+
+  const moved = await f.model.setShortcut('learnCorrection', { kind: 'chord', code: 37, modifiers: ['command', 'shift'] })
+  assert.equal(moved.ok, true)
+  assert.deepEqual([...f.model.stored.shortcuts.learnCorrection.modifiers], ['shift', 'command'])
+})
+
+test('recording a new shortcut pauses the current ones until it is saved or cancelled', async (t) => {
+  const f = fixture(t)
+  await f.model.registerShortcut()
+  f.model.captureShortcut(true)
+  await f.flush()
+  assert.equal(f.registrations.at(-1).length, 0)
+  // A retry while capturing must not turn them back on.
+  await f.model.registerShortcut()
+  assert.equal(f.registrations.at(-1).length, 0)
+  f.model.captureShortcut(false)
+  await f.flush()
+  assert.equal(f.registrations.at(-1).length, 3)
+  f.model.captureShortcut(true)
+  f.advance(30_000)
+  await f.flush()
+  assert.equal(f.registrations.at(-1).length, 3)
 })

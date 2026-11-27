@@ -155,12 +155,12 @@ function Recording({ hud, samples, line }: { hud: HudState; samples: React.RefOb
 function LineContent({ hud, line }: { hud: HudState; line: Line }) {
   switch (line.kind) {
     case 'holdPending': return <><HoldProgress startedAt={hud.holdStartedAt!} /><span>Keep holding to talk</span></>
-    case 'holding': return <><span className="hold-dot" />Release <kbd>⌃ Space</kbd> to finish</>
+    case 'holding': return <><span className="hold-dot" />Release <kbd>{hud.shortcut}</kbd> to finish</>
     case 'quiet': return <span className="ellipsis">Can’t hear you · {hud.microphone || 'check your microphone'}</span>
     case 'live': return <LiveText text={line.text!} />
-    case 'editing': return <>Editing selection · <kbd>⌃ Space</kbd> to finish</>
+    case 'editing': return <>Editing selection · <kbd>{hud.shortcut}</kbd> to finish</>
     case 'note': return <span className="ellipsis">{line.text}</span>
-    case 'hint': return <><kbd>⌃ Space</kbd> finish <kbd>esc</kbd> cancel</>
+    case 'hint': return <><kbd>{hud.shortcut}</kbd> finish <kbd>esc</kbd> cancel</>
     case 'destination': return <Destination hud={hud} />
   }
 }

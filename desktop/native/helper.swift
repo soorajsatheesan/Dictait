@@ -7,8 +7,10 @@
 //   dictait-helper serve            JSON lines on stdin/stdout (requests, replies, hotkey events)
 //   dictait-helper paste|focus|inputs|screens   one-off commands, printing JSON
 //   dictait-helper post-key <code> <modifiers…>   diagnostics: press, hold and release a key
+//   dictait-helper media '<json>'   one media request, e.g. restoring the volume while Dictait quits
 import AppKit
 import ApplicationServices
+import AudioToolbox
 import Carbon
 import CoreAudio
 
@@ -797,9 +799,438 @@ final class HotKeys {
     }
 }
 
+
+// MARK: - Single-modifier trigger (Right ⌘, Right ⌥, fn)
+
+/// A modifier pressed on its own works like the dictation chord: a tap toggles recording, and a hold
+/// past the hold-to-talk threshold finishes on release. NSEvent monitors see `.flagsChanged` with the
+/// Accessibility permission Dictait already has (no Input Monitoring). Any other key, modifier or click
+/// while it is down means the user is typing a shortcut such as ⌘C, so nothing fires.
+final class ModifierTrigger {
+    enum Key: String {
+        case rightCommand, rightOption, fn
+
+        var codes: Set<UInt16> {
+            switch self {
+            case .rightCommand: return [54]
+            case .rightOption: return [61]
+            case .fn: return [63, 179] // fn, and the Globe key on newer Apple keyboards
+            }
+        }
+
+        /// IOLLEvent.h device bits (NX_DEVICERCMDKEYMASK, NX_DEVICERALTKEYMASK) tell left from right;
+        /// without them (some remapped keyboards) fall back to the device-independent flag.
+        func isDown(_ flags: UInt64) -> Bool {
+            switch self {
+            case .fn: return flags & Flag.function != 0
+            case .rightCommand: return flags & 0x18 != 0 ? flags & 0x10 != 0 : flags & Flag.command != 0
+            case .rightOption: return flags & 0x60 != 0 ? flags & 0x40 != 0 : flags & Flag.option != 0
+            }
+        }
+
+        /// Modifiers that make it a combination: every other family, plus the left key of its own.
+        var others: UInt64 {
+            switch self {
+            case .rightCommand: return Flag.control | Flag.option | Flag.shift | Flag.function | 0x08
+            case .rightOption: return Flag.control | Flag.command | Flag.shift | Flag.function | 0x20
+            case .fn: return Flag.control | Flag.option | Flag.shift | Flag.command
+            }
+        }
+    }
+
+    enum Flag {
+        static let shift: UInt64 = 1 << 17, control: UInt64 = 1 << 18, option: UInt64 = 1 << 19
+        static let command: UInt64 = 1 << 20, function: UInt64 = 1 << 23
+    }
+
+    /// Short enough that hold-to-talk feels immediate, long enough that most ⌘-shortcuts land first.
+    static let armDelay = 0.3
+
+    private var key: Key?
+    private var name = ""
+    private var holdSeconds = 1.2
+    private var monitors: [Any] = []
+    private var pressed: (since: CFAbsoluteTime, wall: Double)?
+    private var reported = false
+    private var spoiled = false
+    private var armTimer: Timer?
+    private var watcher: Timer?
+    /// (name, "down" | "up" | "cancel", milliseconds since 1970)
+    var onEvent: (String, String, Double) -> Void = { _, _, _ in }
+
+    /// Takes [{name, modifierKey, holdMs}] (only the first is used); an empty list stops listening.
+    func register(_ keys: [[String: Any]]) -> [String: Bool] {
+        releaseAll()
+        monitors.forEach { NSEvent.removeMonitor($0) }
+        monitors = []
+        key = nil
+        var result: [String: Bool] = [:]
+        guard let spec = keys.first, let name = spec["name"] as? String else { return result }
+        guard let raw = spec["modifierKey"] as? String, let key = Key(rawValue: raw) else {
+            result[name] = false
+            return result
+        }
+        self.key = key
+        self.name = name
+        if let hold = spec["holdMs"] as? Double, hold > 0 { holdSeconds = hold / 1000 }
+        let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in self?.handle(event) }) {
+            monitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in self?.handle(event); return event }) {
+            monitors.append(local)
+        }
+        // Without Accessibility, macOS installs the monitors but never delivers key events to them.
+        result[name] = !monitors.isEmpty && AXIsProcessTrusted()
+        return result
+    }
+
+    private func handle(_ event: NSEvent) {
+        guard let key else { return }
+        let flags = UInt64(event.modifierFlags.rawValue)
+        if event.type == .flagsChanged, key.codes.contains(event.keyCode) {
+            if key.isDown(flags) { press(flags) } else { release() }
+        } else if pressed != nil {
+            interrupt()
+        }
+    }
+
+    private func press(_ flags: UInt64) {
+        guard pressed == nil, let key else { return }
+        pressed = (CFAbsoluteTimeGetCurrent(), wallClock())
+        reported = false
+        // Already holding Shift, Control or the left key: the user is building a combination.
+        spoiled = flags & key.others != 0
+        if !spoiled {
+            armTimer = Timer.scheduledTimer(withTimeInterval: Self.armDelay, repeats: false) { [weak self] _ in self?.arm() }
+        }
+        ensureWatcher()
+    }
+
+    /// Held on its own long enough: start now, so hold-to-talk hears the first words.
+    private func arm() {
+        armTimer = nil
+        guard let pressed, !spoiled, !reported, !IsSecureEventInputEnabled() else { return }
+        reported = true
+        onEvent(name, "down", pressed.wall)
+    }
+
+    private func interrupt() {
+        guard let pressed, !spoiled else { return }
+        // Once hold-to-talk has taken over, a click while talking is not a shortcut attempt.
+        if reported && CFAbsoluteTimeGetCurrent() - pressed.since >= holdSeconds { return }
+        spoiled = true
+        armTimer?.invalidate()
+        armTimer = nil
+        // Started a moment ago, but it was ⌘-something after all: undo the start.
+        if reported { onEvent(name, "cancel", wallClock()) }
+    }
+
+    private func release() {
+        guard let pressed else { return }
+        self.pressed = nil
+        armTimer?.invalidate()
+        armTimer = nil
+        stopWatcher()
+        guard !spoiled else { return }
+        if !reported {
+            // A tap. Secure input (password fields) hides key presses, so a lone release proves nothing.
+            guard !IsSecureEventInputEnabled() else { return }
+            onEvent(name, "down", pressed.wall)
+        }
+        onEvent(name, "up", wallClock())
+    }
+
+    /// Recover if macOS swallows the release (secure input, sleep, Space switch, lock screen).
+    private func ensureWatcher() {
+        guard watcher == nil else { return }
+        watcher = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self, let key = self.key, self.pressed != nil else { return }
+            // Only release when every source agrees the key is up: a false release would end hold-to-talk.
+            let states: [CGEventSourceStateID] = [.combinedSessionState, .hidSystemState]
+            let down = states.contains { state in
+                key.isDown(UInt64(CGEventSource.flagsState(state).rawValue))
+                    || key.codes.contains { CGEventSource.keyState(state, key: CGKeyCode($0)) }
+            }
+            if !down { self.release() }
+        }
+    }
+
+    private func stopWatcher() {
+        watcher?.invalidate()
+        watcher = nil
+    }
+
+    func releaseAll() {
+        guard pressed != nil else { return }
+        let finish = reported && !spoiled
+        pressed = nil
+        armTimer?.invalidate()
+        armTimer = nil
+        stopWatcher()
+        if finish { onEvent(name, "up", wallClock()) }
+    }
+
+    private func wallClock() -> Double { Date().timeIntervalSince1970 * 1000 }
+}
+
+// MARK: - Media while recording
+
+/// Lower volume: the default output device's level, read and restored exactly through Core Audio
+/// (VirtualMainVolume keeps the balance; per-channel scalars for devices without it), with
+/// AppleScript's `output volume` as a last resort. Devices with no volume control (HDMI, some USB
+/// DACs) are left alone.
+///
+/// Pause media: MediaRemote (private, loaded with dlopen) pauses and plays the Now Playing app.
+/// Since macOS 15.4 MediaRemote no longer *reports* playback to third-party apps (it always says
+/// "not playing"), while sending commands still works. There, Core Audio's per-process output state
+/// (macOS 14.2+) tells whether a known media app or browser is producing sound, and only then is
+/// MediaRemote asked to pause. If MediaRemote is missing, the play/pause media key is sent instead,
+/// and taken back if it started some other app's audio. Limits: a muted or silent video can count as
+/// playing; resuming with the media key toggles, so audio the user restarted mid-dictation would
+/// pause again; nothing is resumed unless Dictait paused it.
+enum Media {
+    private static let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW)
+    private typealias SendCommand = @convention(c) (UInt32, CFDictionary?) -> Bool
+    private typealias IsPlaying = @convention(c) (DispatchQueue, @escaping @convention(block) (Bool) -> Void) -> Void
+    private static let play: UInt32 = 0, pause: UInt32 = 1
+
+    static func handle(_ request: [String: Any]) -> [String: Any] {
+        switch request["action"] as? String {
+        case "duck": return duck(to: (request["level"] as? Double) ?? 0.25)
+        case "restore": return ["ok": restore(request)]
+        case "pause": return pauseMedia()
+        case "resume": return ["ok": resume(request)]
+        default: return ["error": "Unknown media action."]
+        }
+    }
+
+    // MARK: Volume
+
+    private static func defaultOutput() -> AudioDeviceID? {
+        let device = audioNumber(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice) ?? 0
+        return device == 0 ? nil : device
+    }
+
+    private static func address(_ selector: AudioObjectPropertySelector, _ element: UInt32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioDevicePropertyScopeOutput, mElement: element)
+    }
+
+    private static func settable(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector, _ element: UInt32) -> Bool {
+        var where_ = address(selector, element)
+        var settable: DarwinBoolean = false
+        return AudioObjectHasProperty(device, &where_) && AudioObjectIsPropertySettable(device, &where_, &settable) == noErr && settable.boolValue
+    }
+
+    private static func level(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector, _ element: UInt32) -> Float32? {
+        var where_ = address(selector, element)
+        var value: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        return AudioObjectGetPropertyData(device, &where_, 0, nil, &size, &value) == noErr ? value : nil
+    }
+
+    @discardableResult
+    private static func setLevel(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector, _ element: UInt32, _ value: Float32) -> Bool {
+        var where_ = address(selector, element)
+        var value = max(0, min(1, value))
+        return AudioObjectSetPropertyData(device, &where_, 0, nil, UInt32(MemoryLayout<Float32>.size), &value) == noErr
+    }
+
+    private static func muted(_ device: AudioDeviceID) -> Bool {
+        var where_ = address(kAudioDevicePropertyMute, kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(device, &where_, 0, nil, &size, &value) == noErr && value != 0
+    }
+
+    /// Lowers the default output to `level` × its current volume and returns how to put it back.
+    static func duck(to fraction: Double) -> [String: Any] {
+        let fraction = Float32(max(0, min(1, fraction)))
+        guard let device = defaultOutput() else { return ["ok": false] }
+        if muted(device) { return ["ok": false] }
+        let candidates: [(String, AudioObjectPropertySelector, [UInt32])] = [
+            ("virtual", kAudioHardwareServiceDeviceProperty_VirtualMainVolume, [kAudioObjectPropertyElementMain]),
+            ("scalar", kAudioDevicePropertyVolumeScalar, [kAudioObjectPropertyElementMain]),
+            ("scalar", kAudioDevicePropertyVolumeScalar, [1, 2])
+        ]
+        for (kind, selector, elements) in candidates {
+            let usable = elements.filter { settable(device, selector, $0) }
+            let levels = usable.compactMap { element in level(device, selector, element).map { (element, $0) } }
+            guard !levels.isEmpty, levels.count == usable.count else { continue }
+            guard levels.contains(where: { $0.1 > 0.001 }) else { return ["ok": false] }
+            for (element, value) in levels { setLevel(device, selector, element, value * fraction) }
+            return ["ok": true, "hold": [
+                "action": "restore", "via": kind, "device": Int(device),
+                "levels": levels.map { ["element": Int($0.0), "value": Double($0.1)] }
+            ]]
+        }
+        // No Core Audio volume control: try the volume AppleScript sees (0–100).
+        if let current = appleScript("output volume of (get volume settings)")?.int32Value, current > 0,
+           appleScript("set volume output volume \(Int(Float32(current) * fraction))") != nil {
+            return ["ok": true, "hold": ["action": "restore", "via": "applescript", "volume": Int(current)]]
+        }
+        return ["ok": false]
+    }
+
+    /// Puts back the exact level saved by `duck`, on the device that was ducked.
+    static func restore(_ hold: [String: Any]) -> Bool {
+        if hold["via"] as? String == "applescript" {
+            guard let volume = hold["volume"] as? Int else { return false }
+            return appleScript("set volume output volume \(volume)") != nil
+        }
+        guard let device = hold["device"] as? Int, let levels = hold["levels"] as? [[String: Any]] else { return false }
+        let selector = hold["via"] as? String == "virtual" ? kAudioHardwareServiceDeviceProperty_VirtualMainVolume : kAudioDevicePropertyVolumeScalar
+        var ok = !levels.isEmpty
+        for entry in levels {
+            guard let element = entry["element"] as? Int, let value = entry["value"] as? Double,
+                  setLevel(AudioDeviceID(device), selector, UInt32(element), Float32(value)) else { ok = false; continue }
+        }
+        return ok
+    }
+
+    private static func appleScript(_ source: String) -> NSAppleEventDescriptor? {
+        // NSAppleScript belongs on the main thread; `volume settings` needs no Automation permission.
+        let run = { () -> NSAppleEventDescriptor? in
+            var error: NSDictionary?
+            return NSAppleScript(source: source)?.executeAndReturnError(&error)
+        }
+        return Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    }
+
+    // MARK: Playback
+
+    private static var sendCommand: SendCommand? {
+        guard let handle, let symbol = dlsym(handle, "MRMediaRemoteSendCommand") else { return nil }
+        return unsafeBitCast(symbol, to: SendCommand.self)
+    }
+
+    /// MediaRemote's answer, or nil where it cannot be trusted (macOS 15.4+) or does not answer.
+    private static func nowPlayingIsPlaying() -> Bool? {
+        guard !ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 15, minorVersion: 4, patchVersion: 0)),
+              let handle, let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying") else { return nil }
+        let isPlaying = unsafeBitCast(symbol, to: IsPlaying.self)
+        let done = DispatchSemaphore(value: 0)
+        var playing = false
+        isPlaying(DispatchQueue.global()) { value in playing = value; done.signal() }
+        return done.wait(timeout: .now() + 0.5) == .success ? playing : nil
+    }
+
+    /// Bundle identifiers of apps whose sound is media worth pausing, never calls or system sounds.
+    private static let mediaApps = [
+        "com.apple.Music", "com.apple.podcasts", "com.apple.TV", "com.apple.QuickTimePlayerX", "com.apple.iBooksX", "com.spotify.client",
+        "com.tidal.desktop", "com.amazon.music", "com.deezer", "au.com.shiftyjelly", "com.colliderli.iina", "org.videolan.vlc",
+        "com.apple.Safari", "com.apple.WebKit", "com.google.Chrome", "com.brave.Browser", "company.thebrowser", "org.mozilla",
+        "com.microsoft.edgemac", "com.operasoftware", "com.vivaldi", "ai.perplexity.comet"
+    ]
+
+    /// Processes sending sound to an output device right now (macOS 14.2+), by pid.
+    static func outputProcesses() -> [pid_t: String]? {
+        guard #available(macOS 14.2, *) else { return nil }
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        var where_ = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(system, &where_, 0, nil, &size) == noErr else { return nil }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &where_, 0, nil, &size, &ids) == noErr else { return nil }
+        var result: [pid_t: String] = [:]
+        for id in ids where audioNumber(id, kAudioProcessPropertyIsRunningOutput) ?? 0 != 0 {
+            var pidAddress = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyPID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var pid: pid_t = 0
+            var pidSize = UInt32(MemoryLayout<pid_t>.size)
+            guard AudioObjectGetPropertyData(id, &pidAddress, 0, nil, &pidSize, &pid) == noErr, pid != getpid() else { continue }
+            var bundleAddress = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyBundleID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var bundle: Unmanaged<CFString>?
+            var bundleSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            var identifier = ""
+            if AudioObjectGetPropertyData(id, &bundleAddress, 0, nil, &bundleSize, &bundle) == noErr, let value = bundle?.takeRetainedValue() {
+                identifier = value as String
+            }
+            if identifier.isEmpty { identifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "" }
+            result[pid] = identifier
+        }
+        return result
+    }
+
+    private static func isMedia(_ bundle: String) -> Bool {
+        mediaApps.contains { bundle == $0 || bundle.hasPrefix($0 + ".") }
+    }
+
+    /// Play/pause on the keyboard (NX_KEYTYPE_PLAY), which macOS routes to the Now Playing app.
+    private static func postPlayPauseKey() {
+        for down in [true, false] {
+            let state = down ? 0xA : 0xB
+            let event = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(state << 8)),
+                                           timestamp: 0, windowNumber: 0, context: nil, subtype: 8, data1: (16 << 16) | (state << 8), data2: -1)
+            event?.cgEvent?.post(tap: .cghidEventTap)
+        }
+    }
+
+    static func pauseMedia() -> [String: Any] {
+        let before = outputProcesses()
+        let playing: Bool
+        if let reported = nowPlayingIsPlaying() {
+            playing = reported
+        } else {
+            playing = before?.values.contains(where: isMedia) ?? false
+        }
+        guard playing else { return ["ok": false] }
+        if let send = sendCommand, send(pause, nil) {
+            return ["ok": true, "hold": ["action": "resume", "via": "mediaremote"]]
+        }
+        guard AXIsProcessTrusted() else { return ["ok": false] }
+        postPlayPauseKey()
+        // The key toggles whatever macOS considers Now Playing. If that started other audio instead,
+        // undo it rather than leave music playing over the dictation.
+        if let before {
+            let deadline = Date().addingTimeInterval(0.8)
+            while Date() < deadline {
+                usleep(100_000)
+                if let now = outputProcesses(), now.contains(where: { before[$0.key] == nil && isMedia($0.value) }) {
+                    postPlayPauseKey()
+                    return ["ok": false]
+                }
+            }
+        }
+        return ["ok": true, "hold": ["action": "resume", "via": "key"]]
+    }
+
+    /// Resumes only what `pauseMedia` paused.
+    static func resume(_ hold: [String: Any]) -> Bool {
+        switch hold["via"] as? String {
+        case "mediaremote": return sendCommand?(play, nil) ?? false
+        case "key":
+            guard AXIsProcessTrusted() else { return false }
+            postPlayPauseKey()
+            return true
+        default: return false
+        }
+    }
+}
+
 // MARK: - Serve
 
 let hotKeys = HotKeys()
+let modifierTrigger = ModifierTrigger()
+/// Media work can wait on MediaRemote or AppleScript; it keeps its own order, apart from focus and paste.
+let mediaQueue = DispatchQueue(label: "org.dictait.helper.media")
+
+/// Chord shortcuts go to Carbon; a lone modifier ({name, modifierKey}) to the modifier trigger.
+func registerShortcuts(_ keys: [[String: Any]]) -> [String: Bool] {
+    var registered = hotKeys.register(keys.filter { $0["modifierKey"] == nil })
+    registered.merge(modifierTrigger.register(keys.filter { $0["modifierKey"] != nil })) { _, new in new }
+    return registered
+}
+
+/// Both kinds of shortcut report the same way: {"event":"hotkey","name","state":"down"|"up"|"cancel","at"}.
+func reportHotkey(_ name: String, _ state: String, _ at: Double) {
+    // Dispatch to axQueue so Carbon returns immediately and never stalls key-up delivery,
+    // while still guaranteeing down/up ordering and capturing focus before Electron acts.
+    axQueue.async {
+        var event: [String: Any] = ["event": "hotkey", "name": name, "state": state, "at": at]
+        if ["dictate", "learnCorrection"].contains(name), state == "down" { event["focus"] = focus() }
+        send(event)
+    }
+}
 
 func handle(_ request: [String: Any]) {
     let cmd = request["cmd"] as? String
@@ -831,15 +1262,8 @@ func handle(_ request: [String: Any]) {
 func serve() -> Never {
     let application = NSApplication.shared
     application.setActivationPolicy(.accessory)
-    hotKeys.onEvent = { name, pressed, at in
-        // Dispatch to axQueue so Carbon returns immediately and never stalls key-up delivery,
-        // while still guaranteeing down/up ordering and capturing focus before Electron acts.
-        axQueue.async {
-            var event: [String: Any] = ["event": "hotkey", "name": name, "state": pressed ? "down" : "up", "at": at]
-            if ["dictate", "learnCorrection"].contains(name), pressed { event["focus"] = focus() }
-            send(event)
-        }
-    }
+    hotKeys.onEvent = { name, pressed, at in reportHotkey(name, pressed ? "down" : "up", at) }
+    modifierTrigger.onEvent = reportHotkey
     hotKeys.install()
     let workspace = NSWorkspace.shared
     if let front = workspace.frontmostApplication {
@@ -875,6 +1299,7 @@ func serve() -> Never {
     for notification in [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, NSWorkspace.sessionDidResignActiveNotification] {
         workspace.notificationCenter.addObserver(forName: notification, object: nil, queue: .main) { _ in
             hotKeys.releaseAll()
+            modifierTrigger.releaseAll()
         }
     }
     Thread {
@@ -884,12 +1309,18 @@ func serve() -> Never {
             let cmd = request["cmd"] as? String
             if cmd == "hotkeys" {
                 DispatchQueue.main.async {
-                    let registered = hotKeys.register(request["keys"] as? [[String: Any]] ?? [])
+                    let registered = registerShortcuts(request["keys"] as? [[String: Any]] ?? [])
                     send(["id": request["id"] ?? NSNull(), "registered": registered])
                 }
             } else if cmd == "screens" {
                 DispatchQueue.main.async {
                     send(["id": request["id"] ?? NSNull(), "screens": screens()])
+                }
+            } else if cmd == "media" {
+                mediaQueue.async {
+                    var reply = Media.handle(request)
+                    reply["id"] = request["id"] ?? NSNull()
+                    send(reply)
                 }
             } else {
                 if cmd == "active-window", let numericId = request["id"] as? Int {
@@ -900,6 +1331,7 @@ func serve() -> Never {
                 axQueue.async { handle(request) }
             }
         }
+        mediaQueue.sync {} // Finish restoring the volume or resuming playback first.
         exit(0) // Dictait quit or crashed: never linger.
     }.start()
     application.run()
@@ -938,10 +1370,14 @@ case "inputs": send(inputs())
 case "screens":
     let data = (try? JSONSerialization.data(withJSONObject: screens())) ?? Data("[]".utf8)
     FileHandle.standardOutput.write(data)
+case "media":
+    let argument = CommandLine.arguments.dropFirst(2).first ?? "{}"
+    let request = (try? JSONSerialization.jsonObject(with: Data(argument.utf8))) as? [String: Any] ?? [:]
+    send(Media.handle(request))
 case "post-key":
     let values = Array(CommandLine.arguments.dropFirst(2))
     exit(postTestKey(Int(values.first ?? "") ?? 0, Array(values.dropFirst())))
 default:
-    FileHandle.standardError.write(Data("Usage: dictait-helper serve|paste|focus|inputs|screens|post-key\n".utf8))
+    FileHandle.standardError.write(Data("Usage: dictait-helper serve|paste|focus|inputs|screens|media|post-key\n".utf8))
     exit(64)
 }

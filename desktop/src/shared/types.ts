@@ -1,3 +1,5 @@
+import type { Shortcut, ShortcutAction, Shortcuts } from './shortcuts'
+
 /** Long dictations are processed in pieces while you speak, so this can be generous. */
 export const MAX_DICTATION_SECONDS = 30 * 60
 /** Deliberate hold-to-talk; shorter presses keep recording until the next tap. */
@@ -9,6 +11,8 @@ export type Appearance = 'system' | 'light' | 'dark'
 export type MemoryMode = 'notes' | 'terms' | 'off'
 export type Backend = 'whisper' | 'parakeet'
 export type Language = 'auto' | 'en' | 'hi'
+/** What happens to other audio while you dictate. */
+export type MediaMode = 'keep' | 'duck' | 'pause'
 
 /** How Dictait writes in each kind of app. */
 export interface Tones {
@@ -45,6 +49,10 @@ export interface Settings {
   autoUpdate: boolean
   /** Soft recording start and finish cues. */
   feedbackSounds: boolean
+  /** Dictation, paste-last and correction shortcuts. Changed through setShortcut. */
+  shortcuts: Shortcuts
+  /** Keep other audio playing, lower the volume, or pause media while recording. */
+  whileRecording: MediaMode
 }
 
 /** App metadata only; no field contents or remembered paste location. */
@@ -198,6 +206,8 @@ export interface HudState {
   destination: Destination | null
   microphone: string
   micQuiet: boolean
+  /** The dictation shortcut as keycaps, e.g. "⌃ Space" or "Right ⌘". */
+  shortcut: string
 }
 
 export type RecorderCommand = 'start' | 'stop' | 'cancel'
@@ -222,6 +232,9 @@ export interface DictaitAPI {
   setLaunchAtLogin(enabled: boolean): Promise<void>
   openLoginItems(): void
   retryShortcut(): void
+  setShortcut(action: ShortcutAction, shortcut: Shortcut): Promise<WordResult>
+  /** Pause global shortcuts while the renderer records a new one. */
+  captureShortcut(active: boolean): void
   requestMicrophone(): void
   requestAccessibility(): void
   reloadModels(): void

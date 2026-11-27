@@ -80,6 +80,19 @@ test('copied-text recovery remains visible for 6.5 seconds and names both paste 
   assert.equal(f.hud.isVisible, false)
 })
 
+test('the island names the shortcuts the user chose', (t) => {
+  const f = fixture(t)
+  f.model.stored = { shortcuts: {
+    dictate: { kind: 'modifier', key: 'rightOption' },
+    pasteLast: { kind: 'chord', code: 9, modifiers: ['shift', 'command'] },
+    learnCorrection: { kind: 'chord', code: 37, modifiers: ['control', 'option'] }
+  } }
+  f.hud.update()
+  assert.equal(f.sent.filter(([channel]) => channel === 'hud').at(-1)[1].shortcut, 'Right ⌥')
+  f.model.state.phase = 'ready'; f.model.state.message = 'Copied. No text box is focused.'; f.hud.update()
+  assert.match(f.hud.content().detail, /⇧⌘V repeats/)
+})
+
 test('success names only the verified receiving app and freezes that identity', (t) => {
   const f = fixture(t)
   f.model.state.phase = 'ready'; f.model.state.message = 'Pasted.'

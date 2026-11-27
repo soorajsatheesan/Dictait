@@ -5,6 +5,7 @@ import type { AppState, Phase, Section } from '@shared/types'
 import { clock } from '../lib/format'
 import { gentle, snappy } from '../lib/motion'
 import { api, useElapsed, useLevelRef } from '../lib/store'
+import { shortcutKeys } from '@shared/shortcuts'
 import { Keys, Mark } from './ui'
 
 const sections: { id: Section; label: string; icon: LucideIcon; key: string }[] = [
@@ -107,7 +108,7 @@ function RecordButton({ state }: { state: AppState }) {
           </motion.span>
         </AnimatePresence>
         <span className="record-right">
-          {recording ? <LiveBars /> : <Keys keys={['⌃', 'Space']} small />}
+          {recording ? <LiveBars /> : <Keys keys={shortcutKeys(state.settings.shortcuts.dictate)} small />}
         </span>
       </motion.button>
       <AnimatePresence initial={false}>

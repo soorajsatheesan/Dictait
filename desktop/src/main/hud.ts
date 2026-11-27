@@ -1,6 +1,7 @@
 import { BrowserWindow, ipcMain, screen, type Display } from 'electron'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
+import { DEFAULT_SHORTCUTS, shortcutKeys, type Shortcuts } from '@shared/shortcuts'
 import type { HudKind, HudScreen, HudState, RecorderCommand, RecorderOptions } from '@shared/types'
 import type { Coordinator, RecorderBridge } from './coordinator'
 import { paths } from './paths'
@@ -30,7 +31,7 @@ export class RecordingHUD implements RecorderBridge {
   private custom: { kind: HudKind; title: string; detail: string } | null = null
   private state: HudState = {
     visible: false, kind: 'info', title: '', detail: '', startedAt: null, screen: { hasNotch: false, notchWidth: 0, notchHeight: 0 },
-    live: '', note: '', holding: false, holdStartedAt: null, editing: false, destination: null, microphone: '', micQuiet: false
+    live: '', note: '', holding: false, holdStartedAt: null, editing: false, destination: null, microphone: '', micQuiet: false, shortcut: '⌃ Space'
   }
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; requestId: number }>()
   private cleanups: (() => void)[] = []
@@ -154,8 +155,13 @@ export class RecordingHUD implements RecorderBridge {
     }
   }
 
+  private get shortcuts(): Shortcuts {
+    return this.model.stored?.shortcuts ?? DEFAULT_SHORTCUTS
+  }
+
   private content(): { kind: HudKind; title: string; detail: string } {
     if (this.custom) return this.custom
+    const pasteLast = shortcutKeys(this.shortcuts.pasteLast).join('')
     const { phase, message } = this.model.state
     switch (phase) {
       case 'recording': return { kind: 'recording', title: this.model.live.editing ? 'Editing selection' : 'Listening', detail: '' }
@@ -172,11 +178,11 @@ export class RecordingHUD implements RecorderBridge {
         if (/^(Pasted[., ]|Replaced\.|Updated your last dictation\.)/.test(message)) {
           const app = this.model.live.deliveredTo?.appName
           return { kind: 'done', title: app ? `${message.startsWith('Replaced') || message.startsWith('Updated') ? 'Rewritten in' : 'Pasted into'} ${app}` : 'Paste sent',
-            detail: '⌃⌥V pastes your last dictation again' }
+            detail: `${pasteLast} pastes your last dictation again` }
         }
         if (message.startsWith('Selection unchanged')) return { kind: 'empty', title: 'Selection unchanged', detail: message.replace(/^Selection unchanged\.?\s*/, '') || 'Try the instruction again' }
         if (message.startsWith('Copied') || message.includes('new version is on the clipboard')) return {
-          kind: 'copied', title: 'Copied · ready to paste', detail: 'Focus a text box, then ⌘V · ⌃⌥V repeats the last dictation'
+          kind: 'copied', title: 'Copied · ready to paste', detail: `Focus a text box, then ⌘V · ${pasteLast} repeats the last dictation`
         }
         if (message.startsWith('Recording cancelled.')) return { kind: 'cancelled', title: 'Cancelled', detail: '' }
         if (message.startsWith('No speech') || message.startsWith('No audio')) return { kind: 'empty', title: 'Didn’t catch that', detail: 'Try again a little closer' }
@@ -257,7 +263,8 @@ export class RecordingHUD implements RecorderBridge {
     const content = this.content()
     const { live, note, holding, holdStartedAt, editing, microphone, micQuiet, destination, deliveredTo } = this.model.live
     this.state = { ...this.state, ...content, visible: this.visible, startedAt: this.model.state.recordingStartedAt, live, note, holding, holdStartedAt, editing,
-      microphone, micQuiet, destination: this.model.state.phase === 'ready' ? deliveredTo : destination }
+      microphone, micQuiet, destination: this.model.state.phase === 'ready' ? deliveredTo : destination,
+      shortcut: shortcutKeys(this.shortcuts.dictate).join(' ') }
     this.window.webContents.send('hud', this.state)
   }
 

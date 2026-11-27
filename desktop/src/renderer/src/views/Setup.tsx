@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Check, Mic, RotateCw } from 'lucide-react'
+import { shortcutKeys } from '@shared/shortcuts'
 import type { AppState } from '@shared/types'
 import { DotWave } from '../components/DotWave'
 import { Keys, Mark } from '../components/ui'
@@ -20,6 +21,7 @@ export function SetupView({ state, onPractice }: { state: AppState; onPractice: 
   const [direction, setDirection] = useState(1)
   const firstTranscript = useRef(state.transcript)
   const modelsReady = !['preparing', 'failed'].includes(state.phase)
+  const keys = shortcutKeys(state.settings.shortcuts.dictate)
   const tried = modelsReady && Boolean(state.transcript) && state.transcript !== firstTranscript.current
   const finish = () => { void api.setSettings({ setupDone: true }) }
   const go = (next: number) => { setDirection(next > step ? 1 : -1); setStep(Math.max(0, Math.min(steps.length - 1, next))) }
@@ -60,11 +62,11 @@ export function SetupView({ state, onPractice }: { state: AppState; onPractice: 
           <motion.section key={step} className="setup-page" custom={direction}
             initial={{ opacity: 0, x: direction * 28, filter: 'blur(6px)' }} animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
             exit={{ opacity: 0, x: direction * -28, filter: 'blur(6px)', transition: { duration: 0.16 } }} transition={smooth}>
-            {step === 0 && <Welcome />}
+            {step === 0 && <Welcome keys={keys} />}
             {step === 1 && <Microphone allowed={state.microphoneAllowed} name={state.microphoneName} />}
             {step === 2 && <Paste allowed={state.accessibilityAllowed} />}
             {step === 3 && <Model state={state} ready={modelsReady} />}
-            {step === 4 && <TryIt tried={tried} transcript={state.transcript} ready={modelsReady} onPractice={() => { finish(); onPractice() }} />}
+            {step === 4 && <TryIt keys={keys} tried={tried} transcript={state.transcript} ready={modelsReady} onPractice={() => { finish(); onPractice() }} />}
           </motion.section>
         </AnimatePresence>
       </main>
@@ -99,10 +101,10 @@ function Panel({ children, className = '', style }: { children: ReactNode; class
   return <div className={`setup-panel ${className}`} style={style}>{children}</div>
 }
 
-function Welcome() {
+function Welcome({ keys }: { keys: string[] }) {
   return (
     <Page title="Welcome to Dictait"
-      lede={<>Press <Keys keys={['⌃', 'Space']} small /> in any app, say what you want to write, and press it again. The text appears at your cursor. Your voice is processed on this Mac and never uploaded.</>}>
+      lede={<>Press <Keys keys={keys} small /> in any app, say what you want to write, and press it again. The text appears at your cursor. Your voice is processed on this Mac and never uploaded.</>}>
       <Panel className="welcome-panel ribbed">
         <div className="mini-notch">
           <Mic size={14} strokeWidth={2.2} className="rec-mic" />
@@ -158,13 +160,13 @@ function Model({ state, ready }: { state: AppState; ready: boolean }) {
   )
 }
 
-function TryIt({ tried, transcript, ready, onPractice }: { tried: boolean; transcript: string; ready: boolean; onPractice: () => void }) {
+function TryIt({ keys, tried, transcript, ready, onPractice }: { keys: string[]; tried: boolean; transcript: string; ready: boolean; onPractice: () => void }) {
   const field = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { field.current?.focus() }, [])
   return (
     <Page title={tried ? 'You’re all set' : 'Try a dictation'}
       lede={tried ? <>Dictait wrote “{transcript.slice(0, 90)}{transcript.length > 90 ? '…' : ''}”. The same shortcut works in every app.</>
-        : <>Press <Keys keys={['⌃', 'Space']} small />, say a sentence, then press it again. Your words land in the box below.</>}>
+        : <>Press <Keys keys={keys} small />, say a sentence, then press it again. Your words land in the box below.</>}>
       <Panel className="try-panel">
         <textarea ref={field} className="try-field" placeholder={ready ? 'Your dictation appears here…' : 'Waiting for the voice model…'} spellCheck={false} />
       </Panel>

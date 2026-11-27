@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { DEFAULT_SHORTCUTS, normalizeShortcuts } from '@shared/shortcuts'
 import type { Settings } from '@shared/types'
 import { SUPPORT } from './paths'
 
@@ -16,7 +17,7 @@ const defaults: Stored = {
   backend: 'whisper', language: 'auto', cleanup: true, autoPaste: true, smartFormatting: true,
   writingStyle: 'Keep my natural tone and wording.', memoryMode: 'notes', learnCorrections: true,
   appearance: 'system', useContext: true, voiceEdits: true, appTones: true, microphone: 'auto',
-  setupDone: false, autoUpdate: true, feedbackSounds: true,
+  setupDone: false, autoUpdate: true, feedbackSounds: true, shortcuts: DEFAULT_SHORTCUTS, whileRecording: 'keep',
   tones: {
     ai: 'Write it as a clear request to an AI assistant: the goal first, then details and constraints. Keep file names, code terms and commands exact.',
     messaging: 'Casual and brief, like a chat message. No greeting or sign-off unless I say one.',
@@ -55,17 +56,18 @@ export function loadSettings(): Stored {
     if (!stored || typeof stored !== 'object' || Array.isArray(stored)) throw new SyntaxError('Invalid settings shape')
     // Anyone upgrading from a version without the setup stage has already set Dictait up.
     if (stored.setupDone === undefined) stored.setupDone = true
-    return { ...defaults, ...stored, tones: { ...defaults.tones, ...(stored.tones ?? {}) } }
+    if (!['keep', 'duck', 'pause'].includes(stored.whileRecording)) delete stored.whileRecording
+    return { ...defaults, ...stored, tones: { ...defaults.tones, ...(stored.tones ?? {}) }, shortcuts: normalizeShortcuts(stored.shortcuts) }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code
     if (code === 'ENOENT') {
       const legacy = legacyPreferences()
-      const migrated = { ...defaults, ...legacy, setupDone: Object.keys(legacy).length > 0 }
+      const migrated = { ...defaults, ...legacy, shortcuts: normalizeShortcuts(null), setupDone: Object.keys(legacy).length > 0 }
       saveSettings(migrated)
       return migrated
     }
     // Transient read failure or corrupt JSON: keep defaults in memory without wiping the file.
-    return { ...defaults, setupDone: true, tones: { ...defaults.tones } }
+    return { ...defaults, setupDone: true, tones: { ...defaults.tones }, shortcuts: normalizeShortcuts(null) }
   }
 }
 

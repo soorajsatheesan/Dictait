@@ -7,7 +7,8 @@ const vm = require('node:vm')
 
 const code = buildSync({
   entryPoints: [path.join(__dirname, '../src/main/tray.ts')],
-  bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', './archive']
+  bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', './archive'],
+  alias: { '@shared': path.join(__dirname, '../src/shared') }
 }).outputFiles[0].text
 
 function trayFixture(model, readRecentSavedDictations = async () => []) {

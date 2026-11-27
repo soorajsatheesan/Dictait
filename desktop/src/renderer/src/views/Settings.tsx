@@ -1,8 +1,10 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
-import type { AppState, Microphone, Settings, Tones } from '@shared/types'
+import { DEFAULT_SHORTCUTS, sameShortcut, shortcutKeys, shortcutName, type Shortcut } from '@shared/shortcuts'
+import type { AppState, MediaMode, Microphone, Settings, Tones } from '@shared/types'
 import { Keys, Segmented, Switch, useToast } from '../components/ui'
+import { ShortcutField } from '../components/ShortcutField'
 import { snappy } from '../lib/motion'
 import { api } from '../lib/store'
 import { MicrophoneTest } from '../components/MicrophoneTest'
@@ -19,17 +21,21 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
         <Health state={state} />
 
         <Group title="Dictation">
-          <Row title="Start and finish" detail={state.shortcutRegistered ? 'Tap to start and tap to finish. Hold for 1.2 seconds for hold-to-talk, then release to finish.' : 'Another app or macOS is using Control–Space.'}>
-            {state.shortcutRegistered ? <Keys keys={['⌃', 'Space']} /> : <button type="button" className="btn secondary" onClick={() => api.retryShortcut()}><RotateCw size={13} /> Retry</button>}
-          </Row>
-          <Row title="Paste last dictation" detail="Puts your latest dictation at the cursor again. Recent ones are in the menu bar too.">
-            <Keys keys={['⌃', '⌥', 'V']} />
-          </Row>
+          <DictateShortcutRow state={state} />
+          <ChordRow title="Paste last dictation" action="pasteLast" value={settings.shortcuts.pasteLast}
+            detail="Puts your latest dictation at the cursor again. Recent ones are in the menu bar too." />
+          <ChordRow title="Review a correction" action="learnCorrection" value={settings.shortcuts.learnCorrection}
+            detail={state.correctionShortcutRegistered ? 'Select your corrected dictation in any app and press this to review and save it.'
+              : `${shortcutName(settings.shortcuts.learnCorrection)} is in use by another app. Choose a different one.`} />
           <Row title="Cancel a recording" detail="Throws the audio away. Nothing is transcribed or saved.">
             <Keys keys={['esc']} />
           </Row>
           <Row title="Recording sounds" detail="Soft cues when recording starts and finishes. Visual feedback is always shown.">
             <Switch label="Recording sounds" on={settings.feedbackSounds} onChange={(value) => set({ feedbackSounds: value })} />
+          </Row>
+          <Row title="While recording" detail={mediaDetail[settings.whileRecording]}>
+            <Segmented label="While recording" value={settings.whileRecording} onChange={(value) => set({ whileRecording: value })}
+              options={[{ value: 'keep', label: 'Keep playing' }, { value: 'duck', label: 'Lower volume' }, { value: 'pause', label: 'Pause media' }]} />
           </Row>
           <Row title="Try the controls" detail="Practise tap-to-record, hold-to-talk and voice editing inside Dictait.">
             <button type="button" className="btn secondary" onClick={onPractice}>Open Practice</button>
@@ -68,7 +74,7 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
           <Row title="Use the text around your cursor" detail="Reads the sentence before your cursor so names, spelling and flow match. Never saved, never leaves this Mac.">
             <Switch label="Use text around the cursor" on={settings.useContext} onChange={(value) => set({ useContext: value })} />
           </Row>
-          <Row title="Edit selected text by voice" detail={<>Select text, press <Keys keys={['⌃', 'Space']} small /> and say “make this shorter” or “translate to Hindi”.</>}>
+          <Row title="Edit selected text by voice" detail={<>Select text, press <Keys keys={shortcutKeys(settings.shortcuts.dictate)} small /> and say “make this shorter” or “translate to Hindi”.</>}>
             <Switch label="Edit selected text by voice" on={settings.voiceEdits} onChange={(value) => set({ voiceEdits: value })} />
           </Row>
           <ToneRow on={settings.appTones} tones={settings.tones} onToggle={(value) => set({ appTones: value })} onTones={(tones) => set({ tones })} />
@@ -97,8 +103,8 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
             <Choice active={settings.memoryMode === 'terms'} onClick={() => set({ memoryMode: 'terms' })} title="Terms only" detail="Learn names and topics; don’t keep the text." />
             <Choice active={settings.memoryMode === 'off'} onClick={() => set({ memoryMode: 'off' })} title="Off" detail="Nothing new is learned or used." />
           </div>
-          <Row title="Learn from corrections" detail={state.correctionShortcutRegistered ? <>Select your corrected dictation and press <Keys keys={['⌃', '⌥', 'L']} small />. Review both versions before saving.</>
-            : 'Control–Option–L is unavailable. Review from clipboard, or retry keyboard shortcuts from the menu bar.'}>
+          <Row title="Learn from corrections" detail={state.correctionShortcutRegistered ? <>Select your corrected dictation and press <Keys keys={shortcutKeys(settings.shortcuts.learnCorrection)} small />. Review both versions before saving.</>
+            : `${shortcutName(settings.shortcuts.learnCorrection)} is unavailable. Review from clipboard, or choose another shortcut under Dictation.`}>
             <button type="button" className="btn secondary" disabled={!state.transcript || !editable} onClick={() => void api.learnCorrection().then((feedback) => { if (!feedback.startsWith('Review')) toast(feedback) })}>Review from clipboard</button>
             <Switch label="Learn from corrections" on={settings.learnCorrections} onChange={(value) => set({ learnCorrections: value })} />
           </Row>
@@ -124,6 +130,79 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
         <p className="settings-foot faint">Dictait runs entirely on this Mac. Audio is deleted after transcription. No account, no cloud, no telemetry.</p>
       </div>
     </div>
+  )
+}
+
+const mediaDetail: Record<MediaMode, string> = {
+  keep: 'Music and videos keep playing while you dictate.',
+  duck: 'Turns the Mac’s volume down to a quarter while you dictate, then back to where it was.',
+  pause: 'Pauses music and videos while you dictate, then resumes only what was playing.'
+}
+
+type Preset = 'controlSpace' | 'rightCommand' | 'rightOption' | 'fn'
+const presets: Record<Preset, Shortcut> = {
+  controlSpace: DEFAULT_SHORTCUTS.dictate,
+  rightCommand: { kind: 'modifier', key: 'rightCommand' },
+  rightOption: { kind: 'modifier', key: 'rightOption' },
+  fn: { kind: 'modifier', key: 'fn' }
+}
+
+function presetOf(shortcut: Shortcut): Preset | 'custom' {
+  return (Object.keys(presets) as Preset[]).find((preset) => sameShortcut(presets[preset], shortcut)) ?? 'custom'
+}
+
+function dictateDetail(shortcut: Shortcut): string {
+  if (shortcut.kind === 'chord') return 'Tap to start and tap to finish. Hold for 1.2 seconds for hold-to-talk, then release to finish.'
+  if (shortcut.key === 'fn') return 'Tap fn on its own to start and finish, or hold it to talk. In System Settings → Keyboard, set “Press fn key to” to “Do Nothing”.'
+  return `Tap ${shortcutName(shortcut)} on its own to start and finish, or hold it to talk. Shortcuts that use it${shortcut.key === 'rightCommand' ? ', like ⌘C,' : ''} still work.`
+}
+
+/** A preset (Control–Space or a single modifier key) or a shortcut the user records. */
+function DictateShortcutRow({ state }: { state: AppState }) {
+  const shortcut = state.settings.shortcuts.dictate
+  const [recording, setRecording] = useState(false)
+  const [error, setError] = useState('')
+  const preset = presetOf(shortcut)
+  const choose = (value: Preset | 'custom') => {
+    setError('')
+    if (value === 'custom') { setRecording(true); return }
+    void api.setShortcut('dictate', presets[value]).then((result) => { if (!result.ok) setError(result.feedback) })
+  }
+  const watching = shortcut.kind === 'modifier'
+  const detail = error ? <span className="row-error">{error}</span>
+    : recording ? 'Press the keys you want to use, including at least Control, or Command with another modifier. Escape cancels.'
+      : !state.shortcutRegistered ? <span className="row-error">{watching ? `Dictait needs Accessibility permission to watch ${shortcutName(shortcut)}.`
+        : sameShortcut(shortcut, DEFAULT_SHORTCUTS.dictate) ? 'Another app or macOS is using Control–Space. Choose another shortcut, or turn off Control–Space for input sources in Keyboard settings.'
+          : `Another app or macOS is using ${shortcutName(shortcut)}. Choose another shortcut.`}</span>
+        : dictateDetail(shortcut)
+  return (
+    <Row title="Start and finish" detail={detail}>
+      {!state.shortcutRegistered && !recording && (watching
+        ? <button type="button" className="btn ghost" onClick={() => api.requestAccessibility()}>Allow…</button>
+        : <button type="button" className="btn ghost" onClick={() => api.retryShortcut()}><RotateCw size={13} /> Retry</button>)}
+      {(preset === 'custom' || recording) && (
+        <ShortcutField key={recording ? 'recording' : 'idle'} label="Start and finish" value={preset === 'custom' ? shortcut : null} autoStart={recording}
+          onRecord={(next) => api.setShortcut('dictate', next)}
+          onDone={(result) => { setRecording(false); setError(result && !result.ok ? result.feedback : '') }} />
+      )}
+      <select className="select" aria-label="Dictation shortcut" value={recording ? 'custom' : preset} onChange={(event) => choose(event.target.value as Preset | 'custom')}>
+        <option value="controlSpace">Control–Space</option>
+        <option value="rightCommand">Right Command</option>
+        <option value="rightOption">Right Option</option>
+        <option value="fn">fn key</option>
+        <option value="custom">{preset === 'custom' ? 'Custom' : 'Custom…'}</option>
+      </select>
+    </Row>
+  )
+}
+
+function ChordRow({ title, action, value, detail }: { title: string; action: 'pasteLast' | 'learnCorrection'; value: Shortcut; detail: string }) {
+  const [error, setError] = useState('')
+  return (
+    <Row title={title} detail={error ? <span className="row-error">{error}</span> : detail}>
+      <ShortcutField label={title} value={value} onRecord={(next) => api.setShortcut(action, next)}
+        onDone={(result) => setError(result && !result.ok ? result.feedback : '')} />
+    </Row>
   )
 }
 

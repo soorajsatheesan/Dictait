@@ -14,9 +14,11 @@ function filterNotes(notes: ArchivedNote[], search: string): ArchivedNote[] {
   return query ? notes.filter((note) => note.body.toLocaleLowerCase().includes(query)) : notes
 }
 
-export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onShowInGraph }: {
+export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onShowInGraph, shortcut }: {
   archive: ArchiveModel; search: string; selected: string | null; onSelect: (id: string) => void
   onOpenTerm: (id: number) => void; onShowInGraph: (id: string) => void
+  /** The dictation shortcut as keycaps. */
+  shortcut: string[]
 }) {
   const notes = useMemo(() => filterNotes(archive.notes, search), [archive.notes, search])
   const groups = useMemo(() => groupByDay(notes), [notes])
@@ -41,7 +43,7 @@ export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onS
 
   if (archive.loaded && archive.notes.length === 0) {
     return (
-      <EmptyState title="No dictations yet" detail={<>Click into any text box, press <Keys keys={['⌃', 'Space']} small /> and talk. Press it again to finish. Everything you dictate is kept here.</>} />
+      <EmptyState title="No dictations yet" detail={<>Click into any text box, press <Keys keys={shortcut} small /> and talk. Press it again to finish. Everything you dictate is kept here.</>} />
     )
   }
 

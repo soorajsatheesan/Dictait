@@ -1,6 +1,7 @@
 import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
+import { DEFAULT_SHORTCUTS, shortcutKeys } from '@shared/shortcuts'
 import type { Section } from '@shared/types'
 import { Sidebar } from './components/Sidebar'
 import { SearchField, ToastProvider } from './components/ui'
@@ -107,7 +108,7 @@ export function App() {
             <AnimatePresence mode="wait" initial={false}>
               <motion.div key={section} className="view" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, transition: { duration: 0.09 } }} transition={smooth}>
                 {section === 'notes' && (
-                  <NotesView archive={archive} search={search} selected={selectedNote} onSelect={setSelectedNote} onOpenTerm={openTerm} onShowInGraph={showInGraph} />
+                  <NotesView shortcut={shortcutKeys(state?.settings.shortcuts.dictate ?? DEFAULT_SHORTCUTS.dictate)} archive={archive} search={search} selected={selectedNote} onSelect={setSelectedNote} onOpenTerm={openTerm} onShowInGraph={showInGraph} />
                 )}
                 {section === 'graph' && (
                   <GraphView archive={archive} search={search} selectedTerm={selectedTerm} selectedNote={selectedNote}

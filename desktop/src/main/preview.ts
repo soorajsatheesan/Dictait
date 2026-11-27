@@ -38,7 +38,7 @@ export async function runPreview(args: string[], where: Locations): Promise<void
     const state: HudState = {
       visible: true, kind, title, detail, startedAt: Date.now() - 12_000, holding: false, holdStartedAt: null, editing: false,
       note: '', live: kind === 'recording' ? 'so the plan is to ship the preview build on Friday and then' : '',
-      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: false,
+      destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: false, shortcut: '⌃ Space',
       screen: shape === 'flat' ? { hasNotch: false, notchWidth: 0, notchHeight: 0 } : { hasNotch: true, notchWidth: 179, notchHeight: 32 }
     }
     window.webContents.send('hud', state)
