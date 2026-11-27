@@ -3,15 +3,29 @@ import { createContext, forwardRef, useCallback, useContext, useEffect, useId, u
 import { Search, X } from 'lucide-react'
 import { snappy, smooth } from '../lib/motion'
 
-/** Dictait's mark: a speech-bubble D with a text caret cut through it, in the ink colour. */
-export function Mark({ size = 22 }: { size?: number }) {
+/** Dictait's mark: a speech-bubble D with a text caret cut through it. `chrome` renders it in liquid metal. */
+export function Mark({ size = 22, chrome = false }: { size?: number; chrome?: boolean }) {
+  const id = useId()
+  const path = 'M26 31 C26 26.6 29.6 23 34 23 H50 A27 27 0 0 1 50 77 H40 L29.5 85.2 C28 86.4 26 85.3 26 83.4 Z M41 35 H55 A2.5 2.5 0 0 1 55 40 H50.5 V60 H55 A2.5 2.5 0 0 1 55 65 H41 A2.5 2.5 0 0 1 41 60 H45.5 V40 H41 A2.5 2.5 0 0 1 41 35 Z'
+  if (!chrome) {
+    return <svg className="mark" width={size * 0.86} height={size} viewBox="24 21 57 66" aria-hidden><path fill="currentColor" fillRule="evenodd" d={path} /></svg>
+  }
   return (
-    <svg className="mark" width={size * 0.86} height={size} viewBox="24 21 57 66" aria-hidden>
-      <path
-        fill="currentColor"
-        fillRule="evenodd"
-        d="M26 31 C26 26.6 29.6 23 34 23 H50 A27 27 0 0 1 50 77 H40 L29.5 85.2 C28 86.4 26 85.3 26 83.4 Z M41 35 H55 A2.5 2.5 0 0 1 55 40 H50.5 V60 H55 A2.5 2.5 0 0 1 55 65 H41 A2.5 2.5 0 0 1 41 60 H45.5 V40 H41 A2.5 2.5 0 0 1 41 35 Z"
-      />
+    <svg className="mark chrome" width={size * 0.86} height={size} viewBox="24 21 57 66" aria-hidden>
+      <defs>
+        {/* Bands of sky and ground reflected in polished metal, with a thin oil-slick rim. */}
+        <linearGradient id={`${id}-metal`} x1="0.1" y1="0" x2="0.75" y2="1">
+          <stop offset="0" stopColor="#FFFFFF" /><stop offset="0.22" stopColor="#C9CBD0" /><stop offset="0.38" stopColor="#6E7178" />
+          <stop offset="0.48" stopColor="#F4F5F7" /><stop offset="0.62" stopColor="#8D9097" /><stop offset="0.8" stopColor="#3A3C41" /><stop offset="1" stopColor="#D8DADF" />
+        </linearGradient>
+        <linearGradient id={`${id}-rim`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#FFD6A0" /><stop offset="0.35" stopColor="#FFFFFF" stopOpacity="0.2" /><stop offset="0.6" stopColor="#9FD8FF" /><stop offset="1" stopColor="#E3B5FF" />
+        </linearGradient>
+        <radialGradient id={`${id}-spec`} cx="0.32" cy="0.22" r="0.35"><stop offset="0" stopColor="#fff" stopOpacity="0.95" /><stop offset="1" stopColor="#fff" stopOpacity="0" /></radialGradient>
+      </defs>
+      <path fill={`url(#${id}-metal)`} fillRule="evenodd" d={path} />
+      <path fill={`url(#${id}-spec)`} fillRule="evenodd" d={path} />
+      <path fill="none" stroke={`url(#${id}-rim)`} strokeWidth="1.4" strokeOpacity="0.85" fillRule="evenodd" d={path} />
     </svg>
   )
 }
@@ -96,7 +110,7 @@ export function EmptyState({ title, detail, children, compact = false }: { title
   return (
     <motion.div className={`empty ${compact ? 'compact' : ''}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={smooth}>
       {!compact && (
-        <div className="empty-art" aria-hidden>
+        <div className="empty-art ribbed" aria-hidden>
           <Mark size={56} />
         </div>
       )}

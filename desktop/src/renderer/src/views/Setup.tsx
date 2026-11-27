@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, RotateCw } from 'lucide-react'
+import { ArrowLeft, Check, Mic, RotateCw } from 'lucide-react'
 import type { AppState } from '@shared/types'
 import { DotWave } from '../components/DotWave'
 import { Keys, Mark } from '../components/ui'
@@ -44,11 +44,11 @@ export function SetupView({ state, onPractice }: { state: AppState; onPractice: 
 
   return (
     <motion.div className="setup" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: 0.25 } }}>
-      <div className="setup-grid" aria-hidden />
+      
       <div className="setup-drag" />
       <header className="setup-top">
-        <span className="setup-brand"><Mark size={18} /><span>Dictait</span></span>
-        <span className="setup-count mono">{String(step + 1).padStart(2, '0')} / {String(steps.length).padStart(2, '0')}</span>
+        <span className="setup-brand"><Mark size={18} chrome /><span>Dictait</span></span>
+        <span className="setup-count">Step {step + 1} of {steps.length}</span>
         <button type="button" className="setup-skip" onClick={finish}>Skip setup</button>
       </header>
       <div className="setup-ticks" aria-hidden>
@@ -77,7 +77,7 @@ export function SetupView({ state, onPractice }: { state: AppState; onPractice: 
         <div className="setup-foot-right">
           {step === 2 && !state.accessibilityAllowed && <button type="button" className="btn ghost" onClick={() => go(3)}>Skip for now</button>}
           <button type="button" className="btn primary big" disabled={primary.disabled} onClick={primary.run}>
-            {primary.label}{!primary.disabled && step < 4 && (step === 0 || primary.label === 'Continue') && <ArrowRight size={14} />}
+            {primary.label}
           </button>
         </div>
       </footer>
@@ -85,10 +85,9 @@ export function SetupView({ state, onPractice }: { state: AppState; onPractice: 
   )
 }
 
-function Page({ eyebrow, title, lede, children }: { eyebrow: string; title: ReactNode; lede: ReactNode; children?: ReactNode }) {
+function Page({ title, lede, children }: { title: ReactNode; lede: ReactNode; children?: ReactNode }) {
   return (
     <>
-      <div className="eyebrow setup-eyebrow">{eyebrow}</div>
       <h1 className="display setup-title">{title}</h1>
       <p className="setup-lede">{lede}</p>
       {children}
@@ -96,21 +95,20 @@ function Page({ eyebrow, title, lede, children }: { eyebrow: string; title: Reac
   )
 }
 
-function Panel({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`setup-panel ${className}`}><i className="corner tl" /><i className="corner tr" /><i className="corner bl" /><i className="corner br" />{children}</div>
+function Panel({ children, className = '', style }: { children: ReactNode; className?: string; style?: React.CSSProperties }) {
+  return <div className={`setup-panel ${className}`} style={style}>{children}</div>
 }
 
 function Welcome() {
   return (
-    <Page eyebrow="Private dictation for Mac" title={<>Speak.<br />It <span className="signal-word">types.</span></>}
-      lede="Press a shortcut anywhere, talk, and clean text lands at your cursor. Speech recognition and cleanup run entirely on this Mac.">
-      <Panel className="welcome-panel">
+    <Page title="Welcome to Dictait"
+      lede={<>Press <Keys keys={['⌃', 'Space']} small /> in any app, say what you want to write, and press it again. The text appears at your cursor. Your voice is processed on this Mac and never uploaded.</>}>
+      <Panel className="welcome-panel ribbed">
         <div className="mini-notch">
-          <span className="rec-dot" />
+          <Mic size={14} strokeWidth={2.2} className="rec-mic" />
           <DotWave width={200} height={24} />
-          <span className="mono mini-time">0:04</span>
+          <span className="mini-time">0:04</span>
         </div>
-        <div className="welcome-facts mono"><span>On device</span><span>No account</span><span>Works offline</span></div>
       </Panel>
     </Page>
   )
@@ -118,8 +116,8 @@ function Welcome() {
 
 function Microphone({ allowed, name }: { allowed: boolean; name: string }) {
   return (
-    <Page eyebrow="Microphone" title="Let Dictait hear you."
-      lede="It only listens between your two presses of the shortcut. Audio is transcribed on this Mac and then deleted.">
+    <Page title="Allow the microphone"
+      lede="Dictait only listens between your two presses of the shortcut. The recording is deleted once it has been transcribed.">
       <Panel>
         <PermissionRow allowed={allowed} label="Microphone" detail={allowed ? name || 'Ready' : 'Choose Allow when macOS asks'} />
       </Panel>
@@ -129,10 +127,9 @@ function Microphone({ allowed, name }: { allowed: boolean; name: string }) {
 
 function Paste({ allowed }: { allowed: boolean }) {
   return (
-    <Page eyebrow="Paste at cursor" title="Type where you’re working."
-      lede={<>Accessibility lets Dictait paste into the app you were using. Turn <b>Dictait</b> on in the list, then come back. Without it, text is copied for you to paste.</>}>
+    <Page title="Allow pasting"
+      lede={<>Accessibility access lets Dictait type into the app you were using. In System Settings, turn on <b>Dictait</b>, then come back here. Without it, your text is copied and you paste it yourself.</>}>
       <Panel>
-        <div className="caret-demo"><span>Ship the preview build on Friday</span><i className="caret" /></div>
         <PermissionRow allowed={allowed} label="Accessibility" detail={allowed ? 'Paste at cursor is on' : 'System Settings › Privacy & Security'} />
       </Panel>
     </Page>
@@ -145,15 +142,12 @@ function Model({ state, ready }: { state: AppState; ready: boolean }) {
   const fraction = ready ? 1 : download && download.total ? Math.min(1, download.done / download.total) : null
   const percent = fraction === null ? null : Math.floor(fraction * 100)
   return (
-    <Page eyebrow="Voice model" title={ready ? 'Ready on this Mac.' : failed ? 'Download paused.' : 'Getting your voice model.'}
-      lede={failed ? state.message : ready ? 'Everything Dictait needs is installed. It works offline from now on.' : 'This happens once. It started when you opened Dictait, so it may already be most of the way there.'}>
-      <Panel className="model-panel">
+    <Page title={ready ? 'Voice model installed' : failed ? 'The download stopped' : 'Downloading the voice model'}
+      lede={failed ? state.message : ready ? 'Dictait has everything it needs and works offline from now on.' : 'This happens once. It began when you opened Dictait, so it may be nearly done.'}>
+      <Panel className="model-panel frost" style={{ '--frost': String(failed ? 0.15 : fraction ?? 0.08) } as React.CSSProperties}>
         <div className="model-readout">
-          <span className={`dot-type model-percent ${ready ? 'ready' : ''}`}>{percent === null ? '··' : String(percent).padStart(2, '0')}<small>%</small></span>
-          <span className="model-meta mono">
-            <span>{download?.model ?? 'Speech + cleanup models'}</span>
-            <span>{download ? `${gb(download.done)} / ${gb(download.total)} GB` : ready ? 'Installed' : failed ? 'Stopped' : 'Preparing'}</span>
-          </span>
+          <span className="model-name">{download ? download.model.replace(/^./, (c) => c.toUpperCase()) : 'Speech and cleanup models'}</span>
+          <span className="model-meta">{download ? `${gb(download.done)} of ${gb(download.total)} GB` : ready ? 'Installed' : failed ? 'Stopped' : 'Preparing'}{percent !== null && !ready ? ` · ${percent}%` : ''}</span>
         </div>
         <div className={`model-track ${fraction === null && !failed ? 'indeterminate' : ''} ${failed ? 'failed' : ''}`}>
           <motion.span animate={{ scaleX: fraction ?? 0.25 }} transition={snappy} />
@@ -168,13 +162,13 @@ function TryIt({ tried, transcript, ready, onPractice }: { tried: boolean; trans
   const field = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { field.current?.focus() }, [])
   return (
-    <Page eyebrow="First dictation" title={tried ? 'That’s it.' : 'Try it now.'}
-      lede={tried ? <>Dictait wrote “{transcript.slice(0, 90)}{transcript.length > 90 ? '…' : ''}”. Use the same shortcut in any app.</>
+    <Page title={tried ? 'You’re all set' : 'Try a dictation'}
+      lede={tried ? <>Dictait wrote “{transcript.slice(0, 90)}{transcript.length > 90 ? '…' : ''}”. The same shortcut works in every app.</>
         : <>Press <Keys keys={['⌃', 'Space']} small />, say a sentence, then press it again. Your words land in the box below.</>}>
       <Panel className="try-panel">
         <textarea ref={field} className="try-field" placeholder={ready ? 'Your dictation appears here…' : 'Waiting for the voice model…'} spellCheck={false} />
       </Panel>
-      <button type="button" className="setup-link" onClick={onPractice}>Or practise with guided lessons →</button>
+      <button type="button" className="setup-link" onClick={onPractice}>Practise with guided lessons instead</button>
     </Page>
   )
 }
@@ -182,10 +176,9 @@ function TryIt({ tried, transcript, ready, onPractice }: { tried: boolean; trans
 function PermissionRow({ allowed, label, detail }: { allowed: boolean; label: string; detail: string }) {
   return (
     <div className={`permission ${allowed ? 'ok' : ''}`}>
-      <span className={`led ${allowed ? 'good' : 'busy'}`} />
       <span className="permission-label">{label}</span>
       <span className="permission-detail">{detail}</span>
-      <span className="permission-state mono">{allowed ? 'Allowed' : 'Waiting'}</span>
+      <span className="permission-state">{allowed ? <><Check size={13} strokeWidth={2.4} /> Allowed</> : 'Not allowed yet'}</span>
     </div>
   )
 }
@@ -195,9 +188,8 @@ function ModelPill({ state, ready, onOpen }: { state: AppState; ready: boolean; 
   const fraction = download && download.total ? Math.min(1, download.done / download.total) : null
   const failed = state.phase === 'failed'
   return (
-    <button type="button" className={`model-pill mono ${ready ? 'ready' : ''} ${failed ? 'failed' : ''}`} onClick={onOpen} title="Voice model">
-      <span className={`led ${ready ? 'good' : failed ? 'warn' : 'busy'}`} />
-      {ready ? 'Model ready' : failed ? 'Model paused' : fraction !== null ? `Model ${Math.floor(fraction * 100)}%` : 'Model preparing'}
+    <button type="button" className={`model-pill ${ready ? 'ready' : ''} ${failed ? 'failed' : ''}`} onClick={onOpen} title="Voice model">
+      {ready ? 'Voice model ready' : failed ? 'Voice model download stopped' : fraction !== null ? `Voice model ${Math.floor(fraction * 100)}%` : 'Preparing voice model'}
       {!ready && !failed && fraction !== null && <span className="model-pill-bar"><span style={{ transform: `scaleX(${fraction})` }} /></span>}
     </button>
   )

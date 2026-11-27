@@ -1,9 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import {
-  Accessibility, AppWindow, AudioLines, Brain, ClipboardCheck, ClipboardPaste, Download, FolderOpen, Keyboard, Languages, Mic, Monitor,
-  Moon, PenLine, Power, RefreshCcw, RotateCw, Sparkles, Sun, TextCursorInput, Volume2, Wand2, GraduationCap, type LucideIcon
-} from 'lucide-react'
+import { RotateCw } from 'lucide-react'
 import type { AppState, Microphone, Settings, Tones } from '@shared/types'
 import { Keys, Segmented, Switch, useToast } from '../components/ui'
 import { snappy } from '../lib/motion'
@@ -22,25 +19,25 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
         <Health state={state} />
 
         <Group title="Dictation">
-          <Row icon={Keyboard} title="Start and finish" detail={state.shortcutRegistered ? 'Tap to start and tap to finish. Hold for 1.2 seconds for hold-to-talk, then release to finish.' : 'Another app or macOS is using Control–Space.'}>
+          <Row title="Start and finish" detail={state.shortcutRegistered ? 'Tap to start and tap to finish. Hold for 1.2 seconds for hold-to-talk, then release to finish.' : 'Another app or macOS is using Control–Space.'}>
             {state.shortcutRegistered ? <Keys keys={['⌃', 'Space']} /> : <button type="button" className="btn secondary" onClick={() => api.retryShortcut()}><RotateCw size={13} /> Retry</button>}
           </Row>
-          <Row icon={ClipboardPaste} title="Paste last dictation" detail="Puts your latest dictation at the cursor again. Recent ones are in the menu bar too.">
+          <Row title="Paste last dictation" detail="Puts your latest dictation at the cursor again. Recent ones are in the menu bar too.">
             <Keys keys={['⌃', '⌥', 'V']} />
           </Row>
-          <Row icon={AudioLines} title="Cancel a recording" detail="Throws the audio away. Nothing is transcribed or saved.">
+          <Row title="Cancel a recording" detail="Throws the audio away. Nothing is transcribed or saved.">
             <Keys keys={['esc']} />
           </Row>
-          <Row icon={Volume2} title="Recording sounds" detail="Soft cues when recording starts and finishes. Visual feedback is always shown.">
+          <Row title="Recording sounds" detail="Soft cues when recording starts and finishes. Visual feedback is always shown.">
             <Switch label="Recording sounds" on={settings.feedbackSounds} onChange={(value) => set({ feedbackSounds: value })} />
           </Row>
-          <Row icon={GraduationCap} title="Try the controls" detail="Practise tap-to-record, hold-to-talk and voice editing inside Dictait.">
+          <Row title="Try the controls" detail="Practise tap-to-record, hold-to-talk and voice editing inside Dictait.">
             <button type="button" className="btn secondary" onClick={onPractice}>Open Practice</button>
           </Row>
-          <Row icon={ClipboardCheck} title="Paste into the focused app" detail="Otherwise your words wait on the clipboard for ⌘V.">
+          <Row title="Paste into the focused app" detail="Otherwise your words wait on the clipboard for ⌘V.">
             <Switch label="Paste automatically" on={settings.autoPaste} onChange={(value) => set({ autoPaste: value })} />
           </Row>
-          <Row icon={Power} title="Launch at login" detail={state.loginNeedsApproval ? 'macOS needs your approval in Login Items.' : 'Starts quietly in the menu bar.'}>
+          <Row title="Launch at login" detail={state.loginNeedsApproval ? 'macOS needs your approval in Login Items.' : 'Starts quietly in the menu bar.'}>
             {state.loginNeedsApproval && <button type="button" className="btn ghost" onClick={() => api.openLoginItems()}>Approve…</button>}
             <Switch label="Launch at login" on={state.launchAtLogin} onChange={(value) => void api.setLaunchAtLogin(value)} />
           </Row>
@@ -55,23 +52,23 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
           </div>
           <MicrophoneRow value={settings.microphone} onChange={(value) => set({ microphone: value })} />
           <MicrophoneTest state={state} />
-          <Row icon={Languages} title="Language" detail="Choosing English skips detection and is a touch faster.">
+          <Row title="Language" detail="Choosing English skips detection and is a touch faster.">
             <Segmented label="Language" value={settings.language} disabled={!editable} onChange={(value) => set({ language: value })}
               options={[{ value: 'auto', label: 'Detect' }, { value: 'en', label: 'English' }, { value: 'hi', label: 'Hindi', disabled: settings.backend !== 'whisper', hint: 'Whisper only' }]} />
           </Row>
         </Group>
 
         <Group title="Writing">
-          <Row icon={Sparkles} title="Fix grammar and punctuation" detail="A local Qwen model removes fillers and tidies sentences, keeping your words.">
+          <Row title="Fix grammar and punctuation" detail="A local Qwen model removes fillers and tidies sentences, keeping your words.">
             <Switch label="Fix grammar" on={settings.cleanup} disabled={!editable} onChange={(value) => set({ cleanup: value })} />
           </Row>
-          <Row icon={Wand2} title="Follow spoken instructions" detail={<>Say “make this into bullet points” or “format this as an email” at the start or end.</>}>
+          <Row title="Follow spoken instructions" detail={<>Say “make this into bullet points” or “format this as an email” at the start or end.</>}>
             <Switch label="Follow spoken instructions" on={settings.smartFormatting} onChange={(value) => set({ smartFormatting: value })} />
           </Row>
-          <Row icon={TextCursorInput} title="Use the text around your cursor" detail="Reads the sentence before your cursor so names, spelling and flow match. Never saved, never leaves this Mac.">
+          <Row title="Use the text around your cursor" detail="Reads the sentence before your cursor so names, spelling and flow match. Never saved, never leaves this Mac.">
             <Switch label="Use text around the cursor" on={settings.useContext} onChange={(value) => set({ useContext: value })} />
           </Row>
-          <Row icon={PenLine} title="Edit selected text by voice" detail={<>Select text, press <Keys keys={['⌃', 'Space']} small /> and say “make this shorter” or “translate to Hindi”.</>}>
+          <Row title="Edit selected text by voice" detail={<>Select text, press <Keys keys={['⌃', 'Space']} small /> and say “make this shorter” or “translate to Hindi”.</>}>
             <Switch label="Edit selected text by voice" on={settings.voiceEdits} onChange={(value) => set({ voiceEdits: value })} />
           </Row>
           <ToneRow on={settings.appTones} tones={settings.tones} onToggle={(value) => set({ appTones: value })} onTones={(tones) => set({ tones })} />
@@ -100,18 +97,18 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
             <Choice active={settings.memoryMode === 'terms'} onClick={() => set({ memoryMode: 'terms' })} title="Terms only" detail="Learn names and topics; don’t keep the text." />
             <Choice active={settings.memoryMode === 'off'} onClick={() => set({ memoryMode: 'off' })} title="Off" detail="Nothing new is learned or used." />
           </div>
-          <Row icon={Brain} title="Learn from corrections" detail={state.correctionShortcutRegistered ? <>Select your corrected dictation and press <Keys keys={['⌃', '⌥', 'L']} small />. Review both versions before saving.</>
+          <Row title="Learn from corrections" detail={state.correctionShortcutRegistered ? <>Select your corrected dictation and press <Keys keys={['⌃', '⌥', 'L']} small />. Review both versions before saving.</>
             : 'Control–Option–L is unavailable. Review from clipboard, or retry keyboard shortcuts from the menu bar.'}>
             <button type="button" className="btn secondary" disabled={!state.transcript || !editable} onClick={() => void api.learnCorrection().then((feedback) => { if (!feedback.startsWith('Review')) toast(feedback) })}>Review from clipboard</button>
             <Switch label="Learn from corrections" on={settings.learnCorrections} onChange={(value) => set({ learnCorrections: value })} />
           </Row>
-          <Row icon={FolderOpen} title="Your notes on disk" detail="Plain Markdown with a graph, ready for Obsidian.">
+          <Row title="Your notes on disk" detail="Plain Markdown with a graph, ready for Obsidian.">
             <button type="button" className="btn secondary" onClick={() => api.openFolder('notes')}>Open folder</button>
           </Row>
         </Group>
 
         <Group title="Appearance">
-          <Row icon={settings.appearance === 'dark' ? Moon : settings.appearance === 'light' ? Sun : Monitor} title="Theme" detail="Follow macOS, or keep one look.">
+          <Row title="Theme" detail="Follow macOS, or keep one look.">
             <Segmented label="Theme" value={settings.appearance} onChange={(value) => set({ appearance: value })}
               options={[{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} />
           </Row>
@@ -119,7 +116,7 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
 
         <Group title="Updates">
           <UpdateRow state={state} />
-          <Row icon={RefreshCcw} title="Check automatically" detail="Looks for new releases on GitHub now and then. Nothing installs until you choose Update.">
+          <Row title="Check automatically" detail="Looks for new releases on GitHub now and then. Nothing installs until you choose Update.">
             <Switch label="Check for updates automatically" on={settings.autoUpdate} onChange={(value) => set({ autoUpdate: value })} />
           </Row>
         </Group>
@@ -143,7 +140,7 @@ function UpdateRow({ state }: { state: AppState }) {
     failed: update.error
   }[update.phase]
   return (
-    <Row icon={Download} title={`Dictait ${version}`} detail={detail}>
+    <Row title={`Dictait ${version}`} detail={detail}>
       {update.phase === 'available' && <button type="button" className="btn primary" onClick={() => api.installUpdate()}>Update now</button>}
       {update.phase === 'downloading' && <span className="update-meter" aria-hidden><span style={{ transform: `scaleX(${Math.max(0.02, update.progress)})` }} /></span>}
       {['idle', 'current', 'failed'].includes(update.phase) && <button type="button" className="btn secondary" onClick={() => void api.checkForUpdates()}>Check now</button>}
@@ -154,18 +151,17 @@ function UpdateRow({ state }: { state: AppState }) {
 function Health({ state }: { state: AppState }) {
   const autoPasteOff = !state.settings.autoPaste
   const checks = [
-    { label: 'Microphone', ok: state.microphoneAllowed, muted: false, stateText: 'On', actionLabel: 'Allow…', fix: () => api.requestMicrophone(), icon: Mic },
-    { label: 'Auto-paste', ok: state.accessibilityAllowed || autoPasteOff, muted: autoPasteOff, stateText: autoPasteOff ? 'Off' : 'On', actionLabel: 'Allow…', fix: () => api.requestAccessibility(), icon: Accessibility },
-    { label: 'Shortcut', ok: state.shortcutRegistered, muted: false, stateText: 'On', actionLabel: 'Retry', fix: () => api.retryShortcut(), icon: Keyboard }
+    { label: 'Microphone', ok: state.microphoneAllowed, muted: false, stateText: 'On', actionLabel: 'Allow…', fix: () => api.requestMicrophone() },
+    { label: 'Auto-paste', ok: state.accessibilityAllowed || autoPasteOff, muted: autoPasteOff, stateText: autoPasteOff ? 'Off' : 'On', actionLabel: 'Allow…', fix: () => api.requestAccessibility() },
+    { label: 'Shortcut', ok: state.shortcutRegistered, muted: false, stateText: 'On', actionLabel: 'Retry', fix: () => api.retryShortcut() }
   ]
   const failed = state.phase === 'failed'
   const preparing = state.phase === 'preparing'
   const allSet = checks.every((check) => check.ok) && !failed && !preparing
-  const title = failed ? 'Dictait needs attention' : preparing ? 'Warming up your models' : allSet ? 'All set. Talk anywhere.' : 'Almost there'
+  const title = failed ? 'Dictait needs attention' : preparing ? 'Warming up your models' : allSet ? 'Ready' : 'Almost there'
   return (
-    <section className={`health ${failed ? 'failed' : allSet ? 'ok' : ''}`}>
+    <section className={`health leak ${failed ? 'failed' : allSet ? 'ok' : 'pending'}`}>
       <div className="health-main">
-        <div className="health-orb" aria-hidden><span /></div>
         <div className="health-text">
           <AnimatePresence mode="popLayout" initial={false}>
             <motion.h2 key={title} className="display health-title" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={snappy}>{title}</motion.h2>
@@ -176,9 +172,8 @@ function Health({ state }: { state: AppState }) {
         {failed && <button type="button" className="btn primary" onClick={() => api.reloadModels()}><RotateCw size={13} /> Retry models</button>}
       </div>
       <div className="health-checks">
-        {checks.map(({ label, ok, muted, stateText, actionLabel, fix, icon: Icon }) => (
+        {checks.map(({ label, ok, muted, stateText, actionLabel, fix }) => (
           <div key={label} className={`check ${ok ? (muted ? '' : 'ok') : 'needed'}`}>
-            <Icon size={14} strokeWidth={2} />
             <span>{label}</span>
             {ok ? <span className="check-state">{stateText}</span> : <button type="button" className="check-fix" onClick={fix}>{actionLabel}</button>}
           </div>
@@ -200,10 +195,9 @@ function Group({ title, note, children }: { title: string; note?: string; childr
   )
 }
 
-function Row({ icon: Icon, title, detail, children }: { icon: LucideIcon; title: string; detail: ReactNode; children: ReactNode }) {
+function Row({ title, detail, children }: { title: string; detail: ReactNode; children: ReactNode }) {
   return (
     <div className="row">
-      <span className="row-icon"><Icon size={15} strokeWidth={1.9} /></span>
       <div className="row-text">
         <div className="row-title">{title}</div>
         <div className="row-detail">{detail}</div>
@@ -239,7 +233,7 @@ function MicrophoneRow({ value, onChange }: { value: string; onChange: (value: s
     ? current?.transport === 'bluetooth' && alternative ? `Uses ${alternative.name}, so ${current.name} keeps full sound quality.` : 'Avoids Bluetooth headset mics when another input is available.'
     : value === 'system' ? `Follows macOS${current ? `: ${current.name}` : ''}.` : 'Always this microphone, when connected.'
   return (
-    <Row icon={Mic} title="Microphone" detail={detail}>
+    <Row title="Microphone" detail={detail}>
       <select className="select" value={value} onChange={(event) => { api.stopMicTest(); onChange(event.target.value) }} aria-label="Microphone">
         <option value="auto">Automatic</option>
         <option value="system">macOS default</option>
@@ -264,7 +258,7 @@ function ToneRow({ on, tones, onToggle, onTones }: { on: boolean; tones: Tones; 
   const [open, setOpen] = useState(false)
   return (
     <>
-      <Row icon={AppWindow} title="Match the app you’re in" detail="Clear requests for AI assistants, casual in chat, polished in email, literal in code. Edit how each sounds.">
+      <Row title="Match the app you’re in" detail="Clear requests for AI assistants, casual in chat, polished in email, literal in code. Edit how each sounds.">
         <button type="button" className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Done' : 'Customize'}</button>
         <Switch label="Match the app" on={on} onChange={onToggle} />
       </Row>

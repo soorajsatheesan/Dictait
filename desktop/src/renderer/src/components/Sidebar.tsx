@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef } from 'react'
-import { AlertTriangle, BookA, NotebookText, RotateCw, Settings2, Waypoints, GraduationCap, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, BookA, Mic, NotebookText, Square, RotateCw, Settings2, Waypoints, GraduationCap, type LucideIcon } from 'lucide-react'
 import type { AppState, Phase, Section } from '@shared/types'
 import { clock } from '../lib/format'
 import { gentle, snappy } from '../lib/motion'
@@ -32,9 +32,8 @@ export function Sidebar({ section, onNavigate, state, counts }: {
     <aside className="sidebar">
       <div className="sidebar-drag" />
       <div className="brand">
-        <Mark size={22} />
+        <Mark size={22} chrome />
         <span className="display brand-name">Dictait</span>
-        {state && <span className="brand-version">v{state.version}</span>}
       </div>
       <nav className="nav" aria-label="Sections">
         {sections.map(({ id, label, icon: Icon, key }) => {
@@ -70,13 +69,12 @@ function StatusLine({ state }: { state: AppState }) {
   const model = state.settings.backend === 'whisper' ? 'Whisper Turbo' : 'Parakeet'
   return (
     <div className="status-line">
-      <span className={`led ${copy.tone === 'good' ? 'good' : copy.tone === 'live' ? 'live' : copy.tone === 'warn' ? 'warn' : 'busy'}`} aria-hidden />
       <AnimatePresence mode="popLayout" initial={false}>
-        <motion.span key={copy.title} className="status-title" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={snappy}>
+        <motion.span key={copy.title} className={`status-title ${copy.tone}`} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={snappy}>
           {copy.title}
         </motion.span>
       </AnimatePresence>
-      <span className="status-model">{model} · on device</span>
+      <span className="status-model">{model}</span>
     </div>
   )
 }
@@ -98,10 +96,10 @@ function RecordButton({ state }: { state: AppState }) {
 
   return (
     <div className="record-wrap">
-      <motion.button type="button" className={`record ${recording ? 'recording' : ''} ${busy ? 'busy' : ''}`} disabled={busy}
+      <motion.button type="button" className={`record key ${recording ? 'recording' : ''} ${busy ? 'busy' : ''}`} disabled={busy}
         onClick={() => api.toggleRecording()} layout transition={snappy} aria-label={recording ? 'Finish dictation' : 'Start dictation'}>
         {busy && <span className="record-sweep" aria-hidden />}
-        <span className="record-orb" aria-hidden />
+        <span className="record-orb key-cap" aria-hidden>{recording ? <Square size={9} fill="currentColor" strokeWidth={0} /> : <Mic size={13} strokeWidth={2.4} />}</span>
         <AnimatePresence mode="popLayout" initial={false}>
           <motion.span key={recording ? 'rec' : busy ? phase : 'idle'} className="record-label"
             initial={{ opacity: 0, y: 8, filter: 'blur(2px)' }} animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }} exit={{ opacity: 0, y: -8, filter: 'blur(2px)' }} transition={snappy}>
@@ -135,6 +133,7 @@ function LiveBars() {
     const ratio = window.devicePixelRatio || 1
     element.width = 30 * ratio; element.height = 16 * ratio
     context.scale(ratio, ratio)
+    const color = getComputedStyle(element).color
     let shown = 0
     let frame = 0
     const draw = (time: number) => {
@@ -147,7 +146,7 @@ function LiveBars() {
         const y = 8 + envelope * amplitude * Math.sin(x * 0.55 - time / 90)
         if (x === 0) context.moveTo(x, y); else context.lineTo(x, y)
       }
-      context.strokeStyle = '#fff'; context.lineWidth = 1.8; context.lineCap = 'round'; context.lineJoin = 'round'
+      context.strokeStyle = color; context.lineWidth = 1.8; context.lineCap = 'round'; context.lineJoin = 'round'
       context.stroke()
       frame = requestAnimationFrame(draw)
     }

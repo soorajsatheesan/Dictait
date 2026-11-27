@@ -82,7 +82,7 @@ export function GraphView({ archive, search, selectedTerm, selectedNote, onSelec
   if (archive.loaded && graph.nodes.length === 0) {
     return (
       <div className="graph-empty">
-        <EmptyState title="Your words will find each other." detail="Mention names, projects and topics while you dictate. Dictait links what you say together, entirely on your Mac." />
+        <EmptyState title="Nothing to connect yet" detail="Names, projects and topics you mention while dictating show up here, linked by the notes they appear in." />
       </div>
     )
   }

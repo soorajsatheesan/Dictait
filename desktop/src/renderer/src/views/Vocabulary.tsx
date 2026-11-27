@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowRight, CornerDownLeft, Pencil, Plus, Sparkles, Trash2, X } from 'lucide-react'
+import { ArrowRight, CornerDownLeft, Pencil, Plus, Trash2, X } from 'lucide-react'
 import type { Suggestion, VocabularyEntry } from '@shared/types'
 import { EmptyState, Highlight, useToast } from '../components/ui'
 import { gentle, smooth, snappy } from '../lib/motion'
@@ -142,7 +142,7 @@ function Suggestions({ vocabulary }: { vocabulary: VocabularyEntry[] }) {
   }
   return (
     <section className="suggestions">
-      <div className="suggestions-head"><Sparkles size={13} /> <span className="eyebrow">Suggested for you</span></div>
+      <div className="suggestions-head"><span className="eyebrow">Suggestions</span></div>
       <div className="suggestion-list">
         <AnimatePresence initial={false} mode="popLayout">
           {items.map((item) => (

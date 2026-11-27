@@ -7,6 +7,7 @@ import { dayLabel, groupByDay, languageName, longDate, spoken, timeLabel, wordCo
 import { kindOf } from '../lib/kinds'
 import { smooth, snappy } from '../lib/motion'
 import { api, type ArchiveModel } from '../lib/store'
+import { Halftone } from '../components/Halftone'
 
 function filterNotes(notes: ArchivedNote[], search: string): ArchivedNote[] {
   const query = search.trim().toLocaleLowerCase()
@@ -40,7 +41,7 @@ export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onS
 
   if (archive.loaded && archive.notes.length === 0) {
     return (
-      <EmptyState title="Say something worth keeping." detail={<>Click into any text box, press <Keys keys={['⌃', 'Space']} small /> and talk. Press it again and your words land right there, and here, searchable forever.</>} />
+      <EmptyState title="No dictations yet" detail={<>Click into any text box, press <Keys keys={['⌃', 'Space']} small /> and talk. Press it again to finish. Everything you dictate is kept here.</>} />
     )
   }
 
@@ -110,10 +111,15 @@ export function NoteDetail({ note, archive, search = '', onOpenTerm, onShowInGra
   const terms = note.terms.map((id) => archive.termsById.get(id)).filter((term) => term !== undefined)
   return (
     <article className={`note-detail ${compact ? 'compact' : ''}`}>
+      {!compact && (
+        <Halftone className="note-cover" id={note.id}>
+          <div className="note-cover-time">{dayLabel(note.created)} · {timeLabel(note.created)}</div>
+          <div className="note-detail-date display">{longDate(note.created)}</div>
+        </Halftone>
+      )}
       <header className="note-detail-head">
         <div>
-          <div className="eyebrow">{dayLabel(note.created)} · {timeLabel(note.created)}</div>
-          {!compact && <div className="note-detail-date display">{longDate(note.created)}</div>}
+          {compact && <div className="eyebrow">{dayLabel(note.created)} · {timeLabel(note.created)}</div>}
         </div>
         <div className="note-actions">
           {onShowInGraph && (

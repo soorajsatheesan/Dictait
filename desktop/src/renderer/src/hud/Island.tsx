@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from 'motion/react'
+import { Mic } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, type HudKind, type HudState } from '@shared/types'
 import { clock } from '../lib/format'
@@ -97,6 +98,7 @@ export function Island() {
         transition={{ ...island, opacity: open ? { duration: 0.1 } : { delay: 0.26, duration: 0.16 } }}
         onAnimationComplete={() => { if (!visible.current) api.hudHidden() }}>
         <div className="island-clip" role="status" aria-live="polite" aria-atomic="true" style={{ borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}>
+          {open && hud.kind === 'done' && <span key={hud.title} className="island-prism" aria-hidden />}
           <AnimatePresence mode="popLayout" initial={false}>
             {open && (
               <motion.div key={recording ? 'recording' : 'status'} className="island-content" style={{ paddingTop: top }}
@@ -133,7 +135,7 @@ function Recording({ hud, samples, line }: { hud: HudState; samples: React.RefOb
   return (
     <div className="island-recording">
       <div className="island-row" style={{ height: ROW }}>
-        <span className={`rec-led ${hud.editing ? 'editing' : ''}`} aria-hidden />
+        <Mic size={14} strokeWidth={2.2} className={`rec-mic ${hud.editing ? 'editing' : ''}`} aria-hidden />
         <DotMatrix samples={samples} />
         <Timer startedAt={hud.startedAt} />
       </div>
