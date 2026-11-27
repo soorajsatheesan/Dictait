@@ -34,7 +34,7 @@ export function Sidebar({ section, onNavigate, state, counts }: {
     <aside className="sidebar">
       <div className="sidebar-drag" />
       <div className="brand">
-        <Mark size={22} chrome />
+        <Mark size={22} />
         <span className="display brand-name">Dictait</span>
       </div>
       <nav className="nav" aria-label="Sections">

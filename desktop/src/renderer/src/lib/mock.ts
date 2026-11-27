@@ -47,30 +47,35 @@ function buildArchive(now: number): Archive {
 }
 
 export function createMock(real?: DictaitAPI): DictaitAPI {
-  let archive = buildArchive(Date.now())
+  // Previews: ?empty=1 starts with nothing saved, ?phase=failed|preparing shows a broken or warming install,
+  // ?ready=1 on setup shows the model installed.
+  const params = new URLSearchParams(location.search)
+  const empty = params.has('empty')
+  let archive = empty ? { notes: [], terms: [], links: [], error: '' } : buildArchive(Date.now())
   let vocabulary: VocabularyEntry[] = [
     { id: 'v1', word: 'Dictait', alias: 'dictate' }, { id: 'v2', word: 'Qwen', alias: 'queen' }, { id: 'v3', word: 'MLX', alias: 'M L X' },
     { id: 'v4', word: 'Northwind', alias: '' }, { id: 'v5', word: 'Arjun', alias: 'Arjen' }, { id: 'v6', word: 'Parakeet', alias: '' }
   ]
-  let snippets: Snippet[] = [
+  let snippets: Snippet[] = empty ? [] : [
     { id: 's1', trigger: 'my calendly', content: 'https://calendly.com/maya-rao/30min' },
     { id: 's2', trigger: 'standup template', content: 'Yesterday:\n- \nToday:\n- \nBlockers:\n- ' },
     { id: 's3', trigger: 'signature', content: 'Best,\nMaya Rao\nNorthwind · maya@northwind.dev' }
   ]
-  let recovered: RecoveredRecording[] = [
+  let recovered: RecoveredRecording[] = empty ? [] : [
     { id: 'r1', at: Date.now() - 25 * 60_000, seconds: 132, reason: 'Transcription took too long', translate: false }
   ]
   // Previews: ?section=setup shows a fresh install mid-download; ?section=settings offers an update.
-  const fresh = new URLSearchParams(location.search).get('section') === 'setup'
+  const fresh = (params.get('section') === 'setup' && !params.has('ready')) || params.get('phase') === 'preparing'
+  const failed = params.get('phase') === 'failed'
   const state: AppState = {
-    phase: fresh ? 'preparing' : 'ready', message: `${shortcutName(DEFAULT_SHORTCUTS.dictate)} to start. Press again to finish.`, notice: '', recordingStartedAt: null,
+    phase: failed ? 'failed' : fresh ? 'preparing' : 'ready', message: failed ? 'The speech model could not load. Retry, or reinstall Dictait if it keeps failing.' : `${shortcutName(DEFAULT_SHORTCUTS.dictate)} to start. Press again to finish.`, notice: '', recordingStartedAt: null,
     transcript: 'Discuss Dictait with Maya tomorrow.', timing: '0.74 s total · 0.44 s transcription', detectedLanguage: 'en',
-    microphoneAllowed: true, accessibilityAllowed: !fresh, shortcutRegistered: true, correctionShortcutRegistered: true, launchAtLogin: true, loginNeedsApproval: false,
+    microphoneAllowed: true, accessibilityAllowed: !fresh && !failed, shortcutRegistered: true, correctionShortcutRegistered: true, launchAtLogin: true, loginNeedsApproval: false,
     rememberedTerms: termList.length,
     settings: {
       backend: 'whisper', language: 'auto', cleanup: true, autoPaste: true, smartFormatting: true, writingStyle: 'Keep my natural tone and wording.',
       memoryMode: 'notes', learnCorrections: true, appearance: 'system', useContext: true, voiceEdits: true, appTones: true, microphone: 'auto',
-      setupDone: !fresh, autoUpdate: true, feedbackSounds: true, shortcuts: { ...DEFAULT_SHORTCUTS }, whileRecording: 'keep',
+      setupDone: params.get('section') !== 'setup', autoUpdate: true, feedbackSounds: true, shortcuts: { ...DEFAULT_SHORTCUTS }, whileRecording: 'keep',
       tones: {
         ai: 'Write it as a clear request to an AI assistant: the goal first, then details and constraints. Keep file names, code terms and commands exact.',
         messaging: 'Casual and brief, like a chat message. No greeting or sign-off unless I say one.',

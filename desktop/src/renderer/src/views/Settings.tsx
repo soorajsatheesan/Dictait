@@ -8,6 +8,7 @@ import { ShortcutField } from '../components/ShortcutField'
 import { snappy } from '../lib/motion'
 import { api } from '../lib/store'
 import { MicrophoneTest } from '../components/MicrophoneTest'
+import { Dither } from '../components/Dither'
 
 export function SettingsView({ state, onPractice }: { state: AppState; onPractice: () => void }) {
   const toast = useToast()
@@ -20,7 +21,7 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
       <div className="settings-inner">
         <Health state={state} />
 
-        <Group title="Dictation">
+        <Group title="Shortcuts">
           <DictateShortcutRow state={state} />
           <ChordRow title="Speak to translate" action="translate" value={settings.shortcuts.translate}
             detail="Speak in any language and Dictait pastes it in English. Tap to start and finish, or hold to talk." />
@@ -38,6 +39,12 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
           <Row title="Cancel a recording" detail="Throws the audio away. Nothing is transcribed or saved.">
             <Keys keys={['esc']} />
           </Row>
+        </Group>
+
+        <Group title="Dictation">
+          <Row title="Paste into the focused app" detail="Otherwise your words wait on the clipboard for ⌘V.">
+            <Switch label="Paste automatically" on={settings.autoPaste} onChange={(value) => set({ autoPaste: value })} />
+          </Row>
           <Row title="Recording sounds" detail="Soft cues when recording starts and finishes. Visual feedback is always shown.">
             <Switch label="Recording sounds" on={settings.feedbackSounds} onChange={(value) => set({ feedbackSounds: value })} />
           </Row>
@@ -45,15 +52,12 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
             <Segmented label="While recording" value={settings.whileRecording} onChange={(value) => set({ whileRecording: value })}
               options={[{ value: 'keep', label: 'Keep playing' }, { value: 'duck', label: 'Lower volume' }, { value: 'pause', label: 'Pause media' }]} />
           </Row>
-          <Row title="Try the controls" detail="Practise tap-to-record, hold-to-talk and voice editing inside Dictait.">
-            <button type="button" className="btn secondary" onClick={onPractice}>Open Practice</button>
-          </Row>
-          <Row title="Paste into the focused app" detail="Otherwise your words wait on the clipboard for ⌘V.">
-            <Switch label="Paste automatically" on={settings.autoPaste} onChange={(value) => set({ autoPaste: value })} />
-          </Row>
           <Row title="Launch at login" detail={state.loginNeedsApproval ? 'macOS needs your approval in Login Items.' : 'Starts quietly in the menu bar.'}>
             {state.loginNeedsApproval && <button type="button" className="btn ghost" onClick={() => api.openLoginItems()}>Approve…</button>}
             <Switch label="Launch at login" on={state.launchAtLogin} onChange={(value) => void api.setLaunchAtLogin(value)} />
+          </Row>
+          <Row title="Try the controls" detail="Practise tap-to-record, hold-to-talk and voice editing inside Dictait.">
+            <button type="button" className="btn secondary" onClick={onPractice}>Open Practice</button>
           </Row>
         </Group>
 
@@ -250,9 +254,14 @@ function Health({ state }: { state: AppState }) {
   const preparing = state.phase === 'preparing'
   const allSet = checks.every((check) => check.ok) && !failed && !preparing
   const title = failed ? 'Dictait needs attention' : preparing ? 'Warming up your models' : allSet ? 'Ready' : 'Almost there'
+  // The mark says the same thing by shape: a whole ball when ready, one filling up while warming
+  // up or missing a permission, and a cracked one when something is broken.
+  const download = state.download
+  const filled = preparing ? (download?.total ? Math.min(1, download.done / download.total) : 0.2) : checks.filter((check) => check.ok).length / checks.length
   return (
-    <section className={`health leak ${failed ? 'failed' : allSet ? 'ok' : 'pending'}`}>
+    <section className={`health ${failed ? 'failed' : allSet ? 'ok' : 'pending'}`}>
       <div className="health-main">
+        <Dither className="health-mark" mode="matrix" cell={3.5} preset={failed ? 'cracked' : allSet ? 'sphere' : 'filling'} value={allSet ? 1 : filled} />
         <div className="health-text">
           <AnimatePresence mode="popLayout" initial={false}>
             <motion.h2 key={title} className="display health-title" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={snappy}>{title}</motion.h2>

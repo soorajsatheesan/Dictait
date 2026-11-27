@@ -1,6 +1,7 @@
-/* Dictait — "Graphite".
-   Plain and quiet: near-black or off-white, hairlines, one typeface in sentence case. Colour is
-   rationed: red only ever means the microphone is live. */
+/* Dictait — "Graphite", printed.
+   Plain and quiet: near-black or off-white, hairlines, one typeface in sentence case. Images are
+   1-bit prints in the ink colour (components/Dither.tsx), never glows. Colour is rationed: the
+   orange key cap, and red only while the microphone is live. */
 
 :root {
   color-scheme: light dark;
@@ -28,7 +29,8 @@
   --signal-text: #D42A1B;
   --signal-soft: rgba(242, 48, 31, 0.09);
   --signal-line: rgba(242, 48, 31, 0.32);
-  --good: #12A150;
+  /* "Good" is just ink: success is said in words and shapes, not green. */
+  --good: var(--text);
   --warn: #B87503;
   --bad: #D93025;
 
@@ -50,9 +52,9 @@
   --kind-topic: #B88300;
   --kind-term: #7C8190;
 
-  /* Texture: fine film grain over everything, and ribbed glass with a warm light behind it. */
+  /* Texture: faint paper grain over everything; ribbed glass is kept for the welcome screen only. */
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  --grain-opacity: 0.05;
+  --grain-opacity: 0.03;
   --rib-base: #E9E5DF;
   --rib-core: #FFF4E6;
   --rib-light: #FFB27A;
@@ -91,7 +93,6 @@
     --signal-text: #FF6A5F;
     --signal-soft: rgba(255, 59, 47, 0.12);
     --signal-line: rgba(255, 59, 47, 0.4);
-    --good: #32D583;
     --warn: #F5B544;
     --bad: #FF6259;
 
@@ -103,7 +104,7 @@
     --shadow-lg: 0 0 0 1px var(--line-strong), 0 30px 70px -20px rgba(0, 0, 0, 0.85);
     --focus: 0 0 0 1px var(--bg), 0 0 0 3px rgba(255, 255, 255, 0.4);
 
-    --grain-opacity: 0.07;
+    --grain-opacity: 0.04;
     --rib-base: #0D0C0C;
     --rib-core: #FFD9B0;
     --rib-light: #FF7A2E;
@@ -152,10 +153,14 @@ input, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
 
 @keyframes led-blink { 50% { opacity: 0.3; } }
 
-/* Film grain: the screen should feel printed, not rendered. */
+/* Paper grain: barely there, so the dithered prints stay crisp. */
 body:not(.hud)::after { content: ''; position: fixed; inset: 0; z-index: 1000; pointer-events: none; background-image: var(--grain); background-size: 180px; opacity: var(--grain-opacity); mix-blend-mode: overlay; }
 
-/* Ribbed glass: a soft warm light seen through vertical flutes. The light's position, size and
+/* 1-bit prints: the canvas sits behind whatever the print holds. */
+.dither { position: relative; isolation: isolate; }
+.dither-ink { position: absolute; inset: 0; z-index: -1; display: block; color: var(--dither-ink, var(--text)); pointer-events: none; }
+
+/* Ribbed glass (welcome screen only): a soft warm light seen through vertical flutes. The light's position, size and
    strength are typed properties, so it glides when they change. */
 @property --rib-x { syntax: '<percentage>'; inherits: true; initial-value: 66%; }
 @property --rib-y { syntax: '<percentage>'; inherits: true; initial-value: 72%; }

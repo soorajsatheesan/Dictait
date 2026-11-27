@@ -3,9 +3,10 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Check, Mic, RotateCw } from 'lucide-react'
 import { shortcutKeys } from '@shared/shortcuts'
 import type { AppState } from '@shared/types'
+import { Dither } from '../components/Dither'
 import { DotWave } from '../components/DotWave'
 import { Keys, Mark } from '../components/ui'
-import { smooth, snappy } from '../lib/motion'
+import { smooth } from '../lib/motion'
 import { api } from '../lib/store'
 
 const gb = (bytes: number) => (bytes / 1e9).toFixed(2)
@@ -49,7 +50,7 @@ export function SetupView({ state, onPractice }: { state: AppState; onPractice: 
       
       <div className="setup-drag" />
       <header className="setup-top">
-        <span className="setup-brand"><Mark size={18} chrome /><span>Dictait</span></span>
+        <span className="setup-brand"><Mark size={18} /><span>Dictait</span></span>
         <span className="setup-count">Step {step + 1} of {steps.length}</span>
         <button type="button" className="setup-skip" onClick={finish}>Skip setup</button>
       </header>
@@ -146,14 +147,14 @@ function Model({ state, ready }: { state: AppState; ready: boolean }) {
   return (
     <Page title={ready ? 'Voice model installed' : failed ? 'The download stopped' : 'Downloading the voice model'}
       lede={failed ? state.message : ready ? 'Dictait has everything it needs and works offline from now on.' : 'This happens once. It began when you opened Dictait, so it may be nearly done.'}>
-      <Panel className="model-panel frost" style={{ '--frost': String(failed ? 0.15 : fraction ?? 0.08) } as React.CSSProperties}>
+      <Panel className="model-panel">
         <div className="model-readout">
           <span className="model-name">{download ? download.model.replace(/^./, (c) => c.toUpperCase()) : 'Speech and cleanup models'}</span>
           <span className="model-meta">{download ? `${gb(download.done)} of ${gb(download.total)} GB` : ready ? 'Installed' : failed ? 'Stopped' : 'Preparing'}{percent !== null && !ready ? ` · ${percent}%` : ''}</span>
         </div>
-        <div className={`model-track ${fraction === null && !failed ? 'indeterminate' : ''} ${failed ? 'failed' : ''}`}>
-          <motion.span animate={{ scaleX: fraction ?? 0.25 }} transition={snappy} />
-        </div>
+        {/* The model arrives as ink filling the well; it stays where it stopped if the download fails. */}
+        <Dither className={`model-well ${failed ? 'failed' : ''}`} preset="rise" seed="model" cell={1.5} value={fraction ?? 0}
+          label={percent === null ? (ready ? 'Installed' : 'Preparing') : `${percent}% downloaded`} />
         {failed && <button type="button" className="btn secondary" onClick={() => api.reloadModels()}><RotateCw size={13} /> Retry</button>}
       </Panel>
     </Page>

@@ -7,9 +7,13 @@ import { gentle, smooth, snappy } from '../lib/motion'
 import { api } from '../lib/store'
 
 /** One-word triggers would fire on everyday speech, so inside a sentence they need “insert” first. */
+function oneWord(trigger: string): boolean {
+  return (trigger.match(/[\p{L}\p{N}]+/gu) ?? []).length < 2
+}
+
+/** How to say a snippet, for its card. */
 function sayLine(trigger: string): string {
-  const words = trigger.match(/[\p{L}\p{N}]+/gu) ?? []
-  return words.length > 1 ? `Say “${trigger}”` : `Say “insert ${trigger}”`
+  return oneWord(trigger) ? `Mid-sentence, say “insert ${trigger}”` : 'Say it on its own or mid-sentence'
 }
 
 export function SnippetsView({ snippets, search }: { snippets: Snippet[]; search: string }) {
@@ -55,7 +59,7 @@ export function SnippetsView({ snippets, search }: { snippets: Snippet[]; search
           <div className="teach-head">
             <div>
               <h3 className="display teach-title">{editing ? <>Editing <em>{editing.trigger}</em></> : 'Save a snippet'}</h3>
-              <p className="muted">Links, addresses and templates you’d rather not dictate. Dictait pastes them exactly as saved.</p>
+              <p className="muted">Links, addresses and templates you’d rather not dictate, saved under a short phrase.</p>
             </div>
             <AnimatePresence>
               {editing && (
@@ -67,11 +71,18 @@ export function SnippetsView({ snippets, search }: { snippets: Snippet[]; search
             </AnimatePresence>
           </div>
           <div className="snippet-fields">
-            <label className="field">
-              <span className="field-label">When you say</span>
-              <input ref={triggerInput} value={trigger} onChange={(event) => { setTrigger(event.target.value); setError('') }}
-                placeholder="my calendly" spellCheck={false} maxLength={TRIGGER_CHARS} autoFocus />
-            </label>
+            <div className="snippet-trigger">
+              <label className="field">
+                <span className="field-label">When you say</span>
+                <input ref={triggerInput} value={trigger} onChange={(event) => { setTrigger(event.target.value); setError('') }}
+                  placeholder="my calendly" spellCheck={false} maxLength={TRIGGER_CHARS} autoFocus />
+              </label>
+              <p className="field-help">
+                {!said ? 'A phrase of two or more words works anywhere in a sentence.'
+                  : oneWord(said) ? <>On its own, “{said}” pastes it. Inside a sentence, say “insert {said}”.</>
+                    : <>Say “{said}” on its own or inside a sentence.</>}
+              </p>
+            </div>
             <label className="field">
               <span className="field-label">Dictait pastes</span>
               <textarea value={content} rows={4} maxLength={SNIPPET_CHARS} placeholder="https://calendly.com/your-name/30min"
@@ -81,11 +92,9 @@ export function SnippetsView({ snippets, search }: { snippets: Snippet[]; search
           </div>
           <div className="snippet-foot">
             <AnimatePresence mode="wait" initial={false}>
-              <motion.p key={error ? 'error' : said ? 'said' : 'idle'} className={`teach-preview ${error ? 'error' : ''}`}
+              <motion.p key={error ? 'error' : 'idle'} className={`teach-preview ${error ? 'error' : ''}`}
                 initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={snappy}>
-                {error ? error : said
-                  ? <>On its own, “{said}” pastes the snippet. Inside a sentence, {sayLine(said).replace(/^Say/, 'say')}.</>
-                  : 'No cleanup touches a snippet, and nothing leaves this Mac.'}
+                {error || 'Pasted exactly as saved: no cleanup, and nothing leaves this Mac.'}
               </motion.p>
             </AnimatePresence>
             <span className="snippet-count">{content.length.toLocaleString()} / {SNIPPET_CHARS.toLocaleString()}</span>
@@ -104,9 +113,9 @@ export function SnippetsView({ snippets, search }: { snippets: Snippet[]; search
         </div>
 
         {shown.length === 0 ? (
-          <EmptyState compact title={query ? 'No snippets match.' : 'Nothing saved yet'}
+          <EmptyState compact title={query ? 'No snippets match' : 'No snippets yet'}
             detail={query ? `Nothing like “${search.trim()}” in your snippets.`
-              : <>For example, save “my calendly” as your booking link. Then say “insert my calendly” and the link appears, spelled right every time.</>} />
+              : <>Save your booking link as “my calendly”, then say “my calendly” in any app and the link appears, spelled right every time.</>} />
         ) : (
           <motion.div className="snippet-list" layout transition={smooth}>
             <AnimatePresence initial={false} mode="popLayout">
@@ -116,7 +125,7 @@ export function SnippetsView({ snippets, search }: { snippets: Snippet[]; search
                   <div className="word-main">
                     <span className="word"><Highlight text={entry.trigger} query={search} /></span>
                     <span className="word-alias">{sayLine(entry.trigger)}</span>
-                    <span className="snippet-content"><Highlight text={entry.content} query={search} /></span>
+                    <span className="snippet-content selectable"><span><Highlight text={entry.content} query={search} /></span></span>
                   </div>
                   <div className="word-actions">
                     <button type="button" className="icon-btn small" onClick={() => edit(entry)} aria-label={`Edit ${entry.trigger}`} title="Edit"><Pencil size={13} /></button>

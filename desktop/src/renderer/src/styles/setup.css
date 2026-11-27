@@ -43,12 +43,13 @@
 .model-readout { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .model-name { font-weight: 600; }
 .model-meta { font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.model-track { position: relative; height: 4px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
-.model-track > span { position: absolute; inset: 0; border-radius: inherit; background: var(--text); transform-origin: 0 50%; }
-.model-track.indeterminate > span { animation: indeterminate 1.4s var(--ease-out) infinite; }
-.model-track.failed > span { background: var(--warn); }
-@keyframes indeterminate { from { transform: translateX(-100%) scaleX(0.25); } to { transform: translateX(100%) scaleX(0.25); } }
+/* The model arrives as ink filling a well, printed in 1-bit. */
+.model-panel { gap: 16px; padding: 18px 18px 0; overflow: hidden; }
+.model-well { height: 132px; margin: 0 -18px; border-top: 1px solid var(--line); }
+.model-well.failed .dither-ink { opacity: 0.45; }
 .model-panel .btn { align-self: flex-start; }
+.model-panel:has(.btn) { padding-bottom: 16px; }
+.model-panel .model-well:has(+ .btn) { margin-bottom: 0; }
 
 /* Try it */
 .try-panel { padding: 4px; }
@@ -72,22 +73,4 @@
   .setup-lede { margin: 10px 0 18px; }
 }
 
-.setup-panel.ribbed, .empty-art.ribbed { background: var(--rib-base); }
-.empty-art.ribbed { color: #fff; box-shadow: none; }
-
-/* Model download: frosted glass that fills with warm light from below as the model arrives. */
-@property --frost { syntax: '<number>'; inherits: true; initial-value: 0; }
-.setup-panel.frost { position: relative; isolation: isolate; overflow: hidden; min-height: 150px; justify-content: flex-start; background: var(--bg); transition: --frost 1.2s var(--ease-out); }
-.setup-panel.frost::before {
-  content: ''; position: absolute; left: -10%; right: -10%; bottom: -40%; z-index: -2; pointer-events: none;
-  height: calc(75% + var(--frost) * 100%); filter: blur(22px);
-  background: radial-gradient(60% 70% at 50% 100%, #FFE2C2 0%, #FF9A4D 35%, rgba(255, 106, 43, 0.6) 60%, transparent 85%);
-  opacity: calc(0.6 + var(--frost) * 0.4);
-}
-.setup-panel.frost::after {
-  content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none; border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
-  -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 0 0 1px var(--line);
-}
-.setup-panel.frost .model-track { background: color-mix(in srgb, var(--text) 14%, transparent); }
+.setup-panel.ribbed { background: var(--rib-base); }

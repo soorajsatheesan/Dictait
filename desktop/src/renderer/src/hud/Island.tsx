@@ -98,7 +98,7 @@ export function Island() {
         transition={{ ...island, opacity: open ? { duration: 0.1 } : { delay: 0.26, duration: 0.16 } }}
         onAnimationComplete={() => { if (!visible.current) api.hudHidden() }}>
         <div className="island-clip" role="status" aria-live="polite" aria-atomic="true" style={{ borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}>
-          {open && hud.kind === 'done' && <span key={hud.title} className="island-prism" aria-hidden />}
+          {open && hud.kind === 'done' && <span key={hud.title} className="island-print" aria-hidden />}
           <AnimatePresence mode="popLayout" initial={false}>
             {open && (
               <motion.div key={recording ? 'recording' : 'status'} className="island-content" style={{ paddingTop: top }}

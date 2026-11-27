@@ -7,7 +7,7 @@ import { clock, dayLabel, groupByDay, languageName, longDate, spoken, timeLabel,
 import { kindOf } from '../lib/kinds'
 import { smooth, snappy } from '../lib/motion'
 import { api, type ArchiveModel } from '../lib/store'
-import { Halftone } from '../components/Halftone'
+import { Dither } from '../components/Dither'
 
 function filterNotes(notes: ArchivedNote[], search: string): ArchivedNote[] {
   const query = search.trim().toLocaleLowerCase()
@@ -91,22 +91,22 @@ function Recovered({ recordings, retryKeys }: { recordings: RecoveredRecording[]
   const retry = async (id: string) => { toast((await api.retryRecording(id)).feedback) }
   const remove = async (id: string) => { toast((await api.deleteRecording(id)).feedback) }
   return (
-    <section className="note-group recovered" aria-label="Recovered recordings">
-      <h3 className="eyebrow note-group-label">Recovered recordings</h3>
+    <section className="recovered" aria-label="Recovered recordings">
+      <h3 className="eyebrow note-group-label">Couldn’t transcribe</h3>
       {recordings.map((recording) => (
         <div key={recording.id} className="recovered-row">
           <span className="note-row-meta">
             <span>{dayLabel(recording.at)} · {timeLabel(recording.at)}</span>
-            <span>{clock(recording.seconds)}{recording.translate ? ' · translation' : ''}</span>
+            <span>{clock(recording.seconds)} of audio{recording.translate ? ' · translation' : ''}</span>
           </span>
           <span className="recovered-reason">{recording.reason}</span>
           <span className="recovered-actions">
-            <button type="button" className="btn secondary" onClick={() => void retry(recording.id)}>Retry</button>
-            <button type="button" className="btn ghost" onClick={() => void remove(recording.id)}>Delete</button>
+            <button type="button" className="btn secondary small" onClick={() => void retry(recording.id)}>Transcribe again</button>
+            <button type="button" className="btn ghost small" onClick={() => void remove(recording.id)}>Delete</button>
           </span>
         </div>
       ))}
-      <p className="recovered-note">Kept on this Mac for 7 days. Retry here to copy the words, or press <Keys keys={retryKeys} small /> in any app to paste the newest one there.</p>
+      <p className="recovered-note">Saved on this Mac for 7 days. Transcribing here copies the words. In any app, <Keys keys={retryKeys} small /> pastes the newest one.</p>
     </section>
   )
 }
@@ -148,10 +148,10 @@ export function NoteDetail({ note, archive, search = '', onOpenTerm, onShowInGra
   return (
     <article className={`note-detail ${compact ? 'compact' : ''}`}>
       {!compact && (
-        <Halftone className="note-cover" id={note.id}>
+        <Dither className="note-cover" preset="cover" mode="halftone" seed={note.id}>
           <div className="note-cover-time">{dayLabel(note.created)} · {timeLabel(note.created)}</div>
           <div className="note-detail-date display">{longDate(note.created)}</div>
-        </Halftone>
+        </Dither>
       )}
       <header className="note-detail-head">
         <div>

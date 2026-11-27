@@ -28,9 +28,9 @@ button, input, textarea, a, .search, .nav, .record-wrap, .notice-card { -webkit-
 .nav-count { margin-left: auto; font: 500 12px/1 var(--font-ui); color: var(--text-3); }
 .sidebar-fill { flex: 1; }
 
-.notice-card { display: flex; gap: 8px; width: 100%; padding: 10px 11px; margin-bottom: 8px; border-radius: 9px; text-align: left; font-size: 11.5px; line-height: 1.4; background: color-mix(in srgb, var(--warn) 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 22%, transparent); overflow: hidden; transition: background-color 0.15s; }
-.notice-card:hover { background: color-mix(in srgb, var(--warn) 14%, transparent); }
-.notice-card svg { flex: none; margin-top: 1px; color: var(--warn); }
+.notice-card { display: flex; gap: 8px; width: 100%; padding: 10px 11px; margin-bottom: 8px; border-radius: 9px; text-align: left; font-size: 11.5px; line-height: 1.4; color: var(--text); background: var(--surface); border: 1px dashed var(--accent-line); overflow: hidden; transition: background-color 0.15s; }
+.notice-card:hover { background: var(--surface-2); }
+.notice-card svg { flex: none; margin-top: 1px; color: var(--text); }
 .notice-card span { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 
 .status-line { display: grid; row-gap: 1px; padding: 10px 10px 12px; overflow: hidden; }
@@ -68,7 +68,7 @@ button, input, textarea, a, .search, .nav, .record-wrap, .notice-card { -webkit-
   box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.5), inset 0 -2px 3px rgba(120, 30, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 .record.key.recording .key-cap { box-shadow: inset 0 2px 4px rgba(120, 30, 0, 0.5), 0 0 0 0 transparent; background: radial-gradient(circle at 50% 60%, #FF7A3C, #E04E12); }
-.record.key.busy .key-cap { background: radial-gradient(circle at 35% 28%, #D7D7D4, #A9A9A5); }
+.record.key.busy .key-cap { background: radial-gradient(circle at 35% 28%, #D7D7D4, #A9A9A5); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.5), inset 0 -2px 3px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.25); }
 .record.key.busy { color: var(--text-2); }
 .record.key.busy .record-right { opacity: 0.4; }
 .record.key .keycap { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }
@@ -81,9 +81,10 @@ button, input, textarea, a, .search, .nav, .record-wrap, .notice-card { -webkit-
   .record.key:active:not(:disabled), .record.key.recording { background: linear-gradient(180deg, #151518, #1D1D21); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(0, 0, 0, 0.7); }
   .record.key.busy .key-cap { background: radial-gradient(circle at 35% 28%, #55555B, #333337); }
 }
-.record-sweep { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; overflow: hidden; }
-.record-sweep::after { content: ''; position: absolute; top: 0; bottom: 0; left: -40%; width: 40%; background: linear-gradient(90deg, transparent, var(--text), transparent); animation: sweep 1.3s var(--ease-out) infinite; }
-@keyframes sweep { to { left: 100%; } }
+/* Busy: a short run of ink dots steps along the key's lower edge, like a print head. */
+.record-sweep { position: absolute; left: 12px; right: 12px; bottom: 4px; height: 2px; overflow: hidden; }
+.record-sweep::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 24px; background: radial-gradient(circle, var(--text-2) 0.75px, transparent 1px) 0 0 / 4px 2px; animation: sweep 1.2s steps(12) infinite; }
+@keyframes sweep { from { transform: translateX(-24px); } to { transform: translateX(calc(196px)); } }
 .record-retry { color: var(--warn); }
 .record-retry .record-label { margin-left: 4px; }
 .record-cancel { display: flex; align-items: center; justify-content: center; gap: 6px; padding-top: 8px; font-size: 11.5px; color: var(--text-3); overflow: hidden; transition: color 0.15s; }
@@ -169,8 +170,8 @@ q { quotes: '“' '”'; }
 
 .empty { display: flex; flex-direction: column; align-items: center; max-width: 400px; margin: auto; padding: 40px 24px; text-align: center; }
 .empty.compact { margin: 12px auto; padding: 28px 24px; }
-.empty-art { position: relative; display: grid; place-items: center; width: 96px; height: 96px; margin-bottom: 22px; border-radius: 22px; color: var(--text); isolation: isolate;
-  background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+.empty-art { flex: none; width: 128px; height: 128px; margin-bottom: 18px; --dither-ink: var(--text); }
+.empty-art .dither-ink { opacity: 0.9; }
 .empty-title { margin: 0 0 8px; font-size: 19px; font-weight: 600; letter-spacing: -0.02em; }
 .empty.compact .empty-title { font-size: 16px; }
 .empty-detail { margin: 0; line-height: 1.65; color: var(--text-2); }
@@ -202,17 +203,18 @@ q { quotes: '“' '”'; }
 .note-pane { position: relative; min-width: 0; overflow-y: auto; }
 .note-pane-inner { max-width: 780px; padding: 34px 48px 56px; }
 .note-cover { position: relative; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; height: 156px; margin-bottom: 14px; padding: 18px 20px; border-radius: 14px; overflow: hidden; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
-/* The cover is printed: ink dots on paper, fading out behind the date. */
-.halftone-ink { position: absolute; inset: 0; color: var(--text); opacity: 0.85; pointer-events: none;
+/* The cover is printed: halftone ink on paper, clear behind the date. */
+.note-cover .dither-ink { opacity: 0.85;
   -webkit-mask-image: linear-gradient(100deg, transparent 40%, #000 78%); mask-image: linear-gradient(100deg, transparent 40%, #000 78%); }
-.note-cover > :not(.halftone-ink) { position: relative; }
+.note-cover > :not(.dither-ink) { position: relative; }
 .note-cover-time { font-size: 12px; color: color-mix(in srgb, var(--text) 62%, transparent); }
 .note-cover .note-detail-date { margin: 0; }
 .note-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .note-detail { position: relative; }
 .note-detail:not(.compact) .note-detail-head { position: absolute; top: 12px; right: 12px; z-index: 2; margin: 0; }
 .note-detail:not(.compact) .note-body { margin-top: 26px; }
-.note-cover .btn.ghost, .note-detail:not(.compact) .note-detail-head .btn.ghost { background: color-mix(in srgb, var(--bg) 40%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.note-detail:not(.compact) .note-detail-head .btn { background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--text); }
+.note-detail:not(.compact) .note-detail-head .btn:hover { background: var(--surface-2); }
 .note-detail-date { margin-top: 4px; font-size: 22px; font-weight: 600; line-height: 1.15; letter-spacing: -0.025em; }
 .note-actions { display: flex; gap: 6px; flex: none; }
 .note-body { max-width: 64ch; font-size: 16px; line-height: 1.7; letter-spacing: -0.006em; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -319,44 +321,53 @@ q { quotes: '“' '”'; }
 
 /* ---------- Snippets ---------- */
 
-.snippet-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: start; gap: 10px; }
+.snippet-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); align-items: start; gap: 14px; }
+.snippet-trigger { display: flex; flex-direction: column; gap: 8px; }
+.field-help { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-2); }
 .field textarea { min-height: 96px; padding: 9px 12px; border: 0; border-radius: 8px; resize: vertical; font-size: 13.5px; line-height: 1.5; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow 0.15s, background-color 0.15s; }
 .field textarea::placeholder { color: var(--text-3); }
 .field textarea:focus { background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent-line); }
-.snippet-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.snippet-foot { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 .snippet-foot .teach-preview { flex: 1; margin: 0; }
 .snippet-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .snippet-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
 .snippet-card { align-items: flex-start; }
-.snippet-content { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; font-size: 12.5px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; color: var(--text-2); }
+/* What gets pasted is shown literally, on a slip, exactly as it will arrive. */
+.snippet-card { position: relative; min-height: 0; padding: 13px 14px 14px; }
+.snippet-card .word-main { flex: 1; gap: 2px; }
+.snippet-card .word-actions { position: absolute; top: 8px; right: 8px; }
+.snippet-card .word, .snippet-card .word-alias { padding-right: 56px; }
+.snippet-content { display: block; margin-top: 9px; padding: 8px 10px; border-radius: 6px; font: 400 11.5px/1.55 var(--font-mono); color: var(--text-2); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
+.snippet-content > span { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---------- Recovered recordings ---------- */
 
 .notes-empty { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.notes-empty > .recovered { width: 100%; max-width: 420px; margin: 24px auto 0; }
-.recovered { padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
-.recovered-row { display: flex; flex-direction: column; gap: 6px; padding: 11px 14px 12px; border-radius: 9px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+.notes-empty > .recovered { width: 100%; max-width: 440px; margin: 28px auto 0; padding: 0 16px 16px; }
+.notes-empty > .recovered .note-group-label { padding-left: 2px; }
+/* Unfinished work: a dashed edge, not a colour. */
+.recovered { padding-bottom: 14px; margin-bottom: 2px; border-bottom: 1px solid var(--line); }
+.recovered-row { display: flex; flex-direction: column; gap: 6px; padding: 11px 12px 12px 14px; border-radius: 9px; background: var(--surface); border: 1px dashed var(--accent-line); }
 .recovered-row + .recovered-row { margin-top: 6px; }
 .recovered-reason { font-size: 13px; line-height: 1.45; color: var(--text); }
-.recovered-actions { display: flex; gap: 6px; }
-.recovered-note { margin: 10px 14px 4px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
-.recovered-note .keys { vertical-align: -3px; }
+.recovered-actions { display: flex; gap: 4px; margin-top: 4px; margin-left: -2px; }
+.recovered-note { margin: 10px 2px 0; font-size: 11.5px; line-height: 1.55; color: var(--text-3); }
+.recovered-note .keys { vertical-align: -3px; margin: 0 1px; }
 
 /* ---------- Settings ---------- */
 
 .settings-inner { display: flex; flex-direction: column; gap: 28px; max-width: 760px; margin: 0 auto; padding: 28px 32px 56px; }
 .health { position: relative; padding: 18px 20px 16px; border-radius: 14px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; isolation: isolate; }
-.health.ok { --health: var(--good); }
-.health.failed { --health: var(--warn); }
-.health-main { display: flex; align-items: center; gap: 14px; }
+.health-main { display: flex; align-items: center; gap: 16px; }
+/* The status mark: a small print whose shape says ready, filling or broken. */
+.health-mark { flex: none; width: 56px; height: 56px; margin: -4px 0 -4px -6px; }
 .health-text { flex: 1; min-width: 0; }
 .health-title { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
 .health-message { margin: 3px 0 0; font-size: 12.5px; }
 .health-notice { margin: 6px 0 0; font-size: 12px; color: var(--warn); }
 .health-checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .check { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12px; font-weight: 500; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
-.check.needed { background: color-mix(in srgb, var(--warn) 9%, var(--surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 25%, transparent); }
-.check.needed { color: var(--warn); }
+.check.needed { background: transparent; box-shadow: none; border: 1px dashed var(--accent-line); }
 .check-state { font-weight: 400; color: var(--text-3); }
 .check-fix { font-weight: 600; color: var(--text); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
 .check-fix:hover { text-decoration-color: currentColor; }
@@ -413,6 +424,7 @@ q { quotes: '“' '”'; }
 .suggestion { display: flex; align-items: center; gap: 4px; padding: 8px 6px 8px 13px; border-radius: 10px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .suggestion-text { display: flex; flex-direction: column; min-width: 0; margin-right: 6px; }
 
+.btn.small { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12px; }
 .btn.big { height: 38px; padding: 0 18px; border-radius: 9px; font-size: 13px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -470,17 +482,3 @@ q { quotes: '“' '”'; }
   .practice-lesson { padding: 8px; font-size: 12px; }
   .practice-label { align-items: flex-start; flex-direction: column; gap: 3px; }
 }
-
-/* Status card: a film light leak burning in from the right edge, like the end of a roll. */
-.health.leak::after {
-  content: ''; position: absolute; top: -20%; bottom: -20%; right: -6%; width: 46%; z-index: -1; pointer-events: none; filter: blur(16px);
-  background:
-    linear-gradient(270deg, rgba(255, 236, 214, 0.75) 0%, rgba(255, 150, 70, 0.55) 14%, rgba(214, 70, 20, 0.35) 38%, transparent 80%),
-    radial-gradient(40% 55% at 85% 40%, rgba(255, 190, 120, 0.6), transparent 70%);
-  animation: leak-flicker 7s ease-in-out infinite;
-}
-.health.leak.failed::after { background: linear-gradient(270deg, rgba(255, 220, 150, 0.55), rgba(224, 160, 48, 0.4) 20%, transparent 70%); }
-.health.leak.pending::after { opacity: 0.35; animation: none; }
-@keyframes leak-flicker { 0%, 100% { opacity: 0.9; transform: translateX(0); } 40% { opacity: 1; transform: translateX(-2%); } 55% { opacity: 0.75; } 70% { opacity: 0.95; transform: translateX(1%); } }
-.health.leak .health-text { max-width: 70%; }
-.health.leak .check { background: color-mix(in srgb, var(--surface) 75%, transparent); }
