@@ -1,7 +1,7 @@
 {
   "name": "dictait",
   "productName": "Dictait",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Private, local dictation for your Mac.",
   "license": "MIT",
   "private": true,
