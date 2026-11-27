@@ -23,6 +23,11 @@ npx electron-builder --mac dir --arm64 --publish never
 DICTAIT_APP="$DICTAIT_ROOT/dist/Dictait.app"
 rm -rf "$DICTAIT_APP"
 ditto "$DICTAIT_ROOT/dist/electron/mac-arm64/Dictait.app" "$DICTAIT_APP"
+# The icon file is named for its artwork. macOS caches app icons by bundle and file name, so a
+# new name makes the Dock and Finder show a redrawn icon instead of a cached older one.
+ICON_NAME="Dictait-ink"
+mv "$DICTAIT_APP/Contents/Resources/icon.icns" "$DICTAIT_APP/Contents/Resources/$ICON_NAME.icns"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile $ICON_NAME.icns" "$DICTAIT_APP/Contents/Info.plist"
 # Ad-hoc sign everything, then give the app a stable designated requirement so
 # macOS keeps Microphone and Accessibility permissions across rebuilds.
 codesign --force --deep --sign - "$DICTAIT_APP"
