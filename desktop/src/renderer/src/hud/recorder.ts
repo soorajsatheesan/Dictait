@@ -6,6 +6,10 @@ const RATE = 16_000
  */
 const CUTS: [seconds: number, pause: number][] = [[3, 0.45], [8, 0.25], [14, 0.12]]
 const PIECE_LIMIT_SECONDS = 25
+/** Keep up to 0.4 s of silent pre-roll so the start of the next word is never clipped. */
+const PREROLL_SECONDS = 0.4
+/** Minimum voiced audio before cutting a piece so pure-silence gaps never hit Whisper. */
+const MIN_VOICED_SECONDS = 0.2
 
 /** Map RMS to a perceptual 0–1 level: -52 dBFS is silence, -12 dBFS is a loud voice. */
 export function levelFromRMS(rms: number): number {
@@ -24,6 +28,7 @@ export class Recorder {
   onPiece: (audio: ArrayBuffer, index: number) => void = () => {}
   private pieceSamples = 0
   private quietSamples = 0
+  private voicedSamples = 0
   private floor = 0
   private pieces = 0
   private stream: MediaStream | null = null
@@ -84,19 +89,35 @@ export class Recorder {
     catch (error) { stream.getTracks().forEach((track) => track.stop()); node.disconnect(); void context.close(); throw error }
     if (session !== this.session) { stream.getTracks().forEach((track) => track.stop()); node.disconnect(); void context.close(); throw new Error('Cancelled.') }
     this.stream = stream; this.context = context; this.node = node; this.chunks = []
-    this.pieceSamples = 0; this.quietSamples = 0; this.floor = 0; this.pieces = 0
+    this.pieceSamples = 0; this.quietSamples = 0; this.voicedSamples = 0; this.floor = 0; this.pieces = 0
   }
 
-  /** Cut at a real pause, judged against the room's own noise floor. */
+  /** Cut at a real pause, judged against the room's own noise floor. Pure silence is pruned instead of sent. */
   private considerCut(length: number, rms: number, rate: number): void {
     this.pieceSamples += length
     this.floor = this.floor === 0 || rms < this.floor ? rms : this.floor + (rms - this.floor) * 0.002
-    const quiet = rms < Math.min(0.02, Math.max(0.003, this.floor * 2.5))
-    this.quietSamples = quiet ? this.quietSamples + length : 0
-    const seconds = this.pieceSamples / rate, pause = this.quietSamples / rate
+    const quiet = rms < Math.min(0.025, Math.max(0.004, this.floor * 2.8))
+    if (quiet) {
+      this.quietSamples += length
+    } else {
+      this.quietSamples = 0
+      this.voicedSamples += length
+    }
+    const seconds = this.pieceSamples / rate, pause = this.quietSamples / rate, voiced = this.voicedSamples / rate
+    // Long silence before speech begins: trim stale silent chunks down to a short pre-roll.
+    if (voiced < MIN_VOICED_SECONDS && seconds >= 2.0) {
+      const keep = Math.round(rate * PREROLL_SECONDS)
+      let total = this.pieceSamples
+      while (this.chunks.length > 1 && total - this.chunks[0].length >= keep) {
+        total -= this.chunks.shift()!.length
+      }
+      this.pieceSamples = total
+      this.quietSamples = Math.min(this.quietSamples, total)
+      return
+    }
     if (seconds >= PIECE_LIMIT_SECONDS || CUTS.some(([after, needed]) => seconds >= after && pause >= needed)) {
-      const audio = toWAV(this.chunks, rate)
-      this.chunks = []; this.pieceSamples = 0; this.quietSamples = 0
+      const audio = voiced >= MIN_VOICED_SECONDS ? toWAV(this.chunks, rate) : null
+      this.chunks = []; this.pieceSamples = 0; this.quietSamples = 0; this.voicedSamples = 0
       if (audio) this.onPiece(audio, this.pieces++)
     }
   }

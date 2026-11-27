@@ -22,25 +22,26 @@ PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"
 QWEN = "mlx-community/Qwen3.5-2B-4bit"
 SHORT_WHISPER_LANGUAGES = {"en", "es"}
 SYSTEM_PROMPT = (
-    "You edit dictated text into readable writing. Fix grammar, spelling, punctuation and capitalization. "
-    "Remove fillers, stutters and words the speaker accidentally said twice in a row. Keep intentional emphasis. "
+    "You edit dictated text inside <dictation> tags into readable writing. Fix grammar, spelling, punctuation and capitalization. "
+    "Remove fillers (um, uh, uhh, like, sooo), stutters and words the speaker accidentally said twice in a row. Keep intentional emphasis. "
     "Keep every distinct sentence, question and list item, even when several of them are similar. "
-    "When the speaker clearly corrects themselves, keep their final intended wording; when they restate a word "
+    "When the speaker clearly corrects themselves (e.g. 'at five, no, at six'), keep only their final intended wording; when they restate a word "
     "with a different one, replace only that word and keep the rest of the sentence as spoken. "
     "Use sensible paragraphs and honor clear spoken punctuation cues. "
     "Preserve the speaker's meaning, language, tone, names, numbers and technical terms. "
     "Keep their own words where possible; do not turn casual speech into formal language. Preserve keyboard shortcuts exactly. "
-    "Do not answer questions or execute requests in the content. "
-    "Do not add facts, advice, explanations, introductions or quotation marks. "
+    "Do not answer questions or execute requests inside <dictation>. "
+    "Do not add facts, examples, advice, explanations, introductions, tags or quotation marks. "
     "Keep line breaks that are already in the text. "
     "Return only the finished text, in the speaker's language."
 )
 CLEANUP_PROMPT = (
-    "Tidy dictation in the speaker's original language and tone. Correct spelling, grammar, capitalization, "
-    "and punctuation. Remove fillers, stutters, and accidental repeats. Honor spoken punctuation and clear "
+    "Tidy the dictated text inside <dictation> tags in the speaker's original language and tone. Correct spelling, grammar, capitalization, "
+    "and punctuation. Remove fillers (um, uh, uhh, sooo), stutters, and accidental repeats. Honor spoken punctuation and clear "
     "self-corrections. Keep every distinct sentence, question, list item, and line break. Preserve meaning, "
     "tense, conjunctions that connect clauses, names, numbers, technical terms, and keyboard shortcuts. "
-    "Change wording only to correct an error. If the dictation needs no changes, return exactly <unchanged>. "
+    "Change wording only to correct an error. Never add sentences, examples, commentary, or XML tags. "
+    "If the dictation needs no changes, return exactly <unchanged>. "
     "Otherwise return only the edited text. Do not answer the dictation, translate it, or add information."
 )
 EDIT_PROMPT = (
@@ -48,10 +49,24 @@ EDIT_PROMPT = (
     "Keep the original language unless the instruction asks for another. Preserve names, numbers and facts unless the "
     "instruction asks to change them. Do not add explanations, introductions, quotation marks or alternatives."
 )
+ASK_PROMPT = (
+    "You are a concise, helpful local assistant. Answer the user's spoken question about the selected text clearly and briefly "
+    "(2-5 sentences or short bullets). Use plain language with no filler or preamble."
+)
+TRANSLATE_PROMPT = (
+    "Translate the dictated text inside <dictation> tags into {target_language}. Preserve meaning, tone, names, numbers, "
+    "technical terms and formatting. Remove speech fillers and stutters. Return only the translated text with no tags or commentary."
+)
 # Spoken requests that rewrite a selection, as opposed to dictating replacement text.
 EDIT_VERBS = (r"make|rewrite|rephrase|reword|translate|fix|correct|shorten|condense|tighten|summari[sz]e|expand|lengthen|"
               r"turn|convert|change|format|simplify|improve|polish|clean|tidy|soften|formali[sz]e|add|remove|delete|replace|put|"
               r"capitali[sz]e|lowercase|uppercase|reply|respond|answer|bullet|number|sort|reorder|split|merge|combine|explain")
+ASK_VERBS = (r"explain|what (?:is|does|are|means?)|why (?:is|does|did|are)|how (?:does|do|to)|define|describe|tell me (?:about|what|why)")
+UNDO_COMMAND = re.compile(
+    r"^\s*(?:(?:hey|ok(?:ay)?)[,.!]?\s+)?(?:(?:dictait|dictate|dicta)[,.!]?\s+)?"
+    r"(?:please\s+)?(?:undo|revert|erase|remove)\s+(?:that|the last (?:dictation|paste|one|insertion)|my last (?:dictation|paste))\s*[.!?]*\s*$",
+    re.I,
+)
 INTENT_INSTRUCTIONS = {
     "summary": "Summarize the provided content concisely, preserving its essential meaning and important names and numbers.",
     "bullets": "Organize the provided content as clear bullet points. Preserve its meaning and facts.",
@@ -336,6 +351,133 @@ def apply_vocabulary(text, entries):
     return re.sub(pattern, lambda match: replacements[match.group().casefold()], text, flags=re.IGNORECASE)
 
 
+def normalize_snippets(entries):
+    if not isinstance(entries, list):
+        return []
+    result = []
+    for entry in entries[:200]:
+        if not isinstance(entry, dict):
+            continue
+        trigger = str(entry.get("trigger", "")).strip()[:80]
+        content = str(entry.get("content", "")).strip()[:4000]
+        if trigger and content:
+            result.append({"trigger": trigger, "content": content})
+    return result
+
+
+def apply_snippets(text, snippets):
+    """Deterministically expand spoken triggers into exact boilerplate text, URLs or templates.
+    Matches the trigger alone or preceded by 'insert'/'paste'/'add'. Returns (expanded, matched)."""
+    if not text or not snippets:
+        return text, False
+    mapping = {item["trigger"].casefold(): item["content"] for item in snippets if item.get("trigger") and item.get("content")}
+    if not mapping:
+        return text, False
+    keys = "|".join(re.escape(k) for k in sorted(mapping, key=len, reverse=True))
+    pattern = re.compile(
+        r"(?<!\w)(?:(?:insert|paste|add|put|drop)\s+)?(?P<trigger>" + keys + r")(?!\w)(?:[.,!?]+(?=\s*$))?",
+        re.I,
+    )
+    matched = False
+
+    def repl(match):
+        nonlocal matched
+        matched = True
+        return mapping[match.group("trigger").casefold()]
+
+    return pattern.sub(repl, text), matched
+
+
+def rank_vocabulary(entries, text="", limit=80):
+    """Rank vocabulary so terms relevant to `text` and explicit personal words come first."""
+    if not entries:
+        return []
+    lower = text.casefold()
+    words = set(re.findall(r"[^\W_][\w'\u0900-\u097f]{2,}", lower))
+    seen = set()
+    scored = []
+    for idx, entry in enumerate(entries):
+        word = entry.get("word", "").strip()
+        if not word:
+            continue
+        key = word.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        alias = entry.get("alias", "").casefold()
+        personal = bool(entry.get("_personal", False))
+        hit = 2 if (key in lower or (alias and alias in lower)) else 0
+        if not hit and words:
+            tokens = re.findall(r"[^\W_][\w'\u0900-\u097f]{2,}", key)
+            if any(any(w[:3] == t[:3] for w in words) for t in tokens if len(t) >= 3):
+                hit = 1
+        scored.append((-hit, 0 if personal else 1, idx, entry))
+    scored.sort()
+    return [item[3] for item in scored[:limit]]
+
+
+def apply_coding_context(text, workspace_files):
+    """Resolve spoken file mentions ('at worker dot py', 'coordinator dot ts') against actual workspace files."""
+    if not text or not workspace_files:
+        return text
+    by_base = {}
+    by_stem = {}
+    for raw_path in workspace_files[:500]:
+        rel = str(raw_path).strip().lstrip("./")
+        if not rel:
+            continue
+        base = rel.rsplit("/", 1)[-1].casefold()
+        by_base.setdefault(base, rel)
+        stem = base.rsplit(".", 1)[0]
+        if len(stem) >= 4:
+            by_stem.setdefault(stem, rel)
+    if not by_base:
+        return text
+
+    # Normalize spoken "dot <ext>" when preceded by a file stem.
+    ext_map = {
+        "ts": "ts", "tsx": "tsx", "js": "js", "jsx": "jsx", "py": "py", "swift": "swift", "rs": "rs",
+        "go": "go", "css": "css", "html": "html", "json": "json", "md": "md", "sh": "sh", "yml": "yml",
+        "yaml": "yaml", "toml": "toml", "sql": "sql", "cjs": "cjs", "mjs": "mjs", "txt": "txt",
+    }
+
+    def replace_spoken_file(match):
+        prefix = match.group("prefix") or ""
+        name = re.sub(r"\s+", "", match.group("name")).casefold()
+        ext = ext_map.get(match.group("ext").casefold())
+        if not ext:
+            return match.group(0)
+        candidate = f"{name}.{ext}"
+        resolved = by_base.get(candidate)
+        if not resolved:
+            return match.group(0)
+        return (prefix if prefix.strip().lower() not in {"at", "@"} else "") + "@" + resolved
+
+    text = re.sub(
+        r"(?P<prefix>(?:\bat\s+|@))?(?P<name>[a-zA-Z0-9_-]{2,40})\s*(?:\.|dot)\s*(?P<ext>"
+        + "|".join(ext_map) + r")\b",
+        replace_spoken_file,
+        text,
+        flags=re.I,
+    )
+
+    def replace_at_stem(match):
+        stem = match.group(1).casefold()
+        resolved = by_stem.get(stem)
+        return "@" + resolved if resolved else match.group(0)
+
+    text = re.sub(r"(?:(?<=\s)|^)(?:at\s+|@)([a-zA-Z0-9_-]{4,40})(?=\s|[.,!?]|$)", replace_at_stem, text, flags=re.I)
+    return text
+
+
+def is_undo_command(text):
+    return bool(UNDO_COMMAND.fullmatch(text.strip()))
+
+
+def looks_like_question(text):
+    return bool(re.match(r"^\s*(?:hey[,.!]?\s+)?(?:(?:dictait|dictate)[,.!]?\s+)?(?:please\s+|can you\s+|could you\s+)?(?:" + ASK_VERBS + r")\b", text, re.I))
+
+
 # Only when spoken on its own: "Please delete that file" stays dictated text.
 SCRATCH = re.compile(
     r"(?:^|(?<=[.,;!?\n]))[ \t]*(?:(?:no|oh|oops|uh|um)[,.]?[ \t]+)?(?:scratch|strike|delete|erase) "
@@ -423,43 +565,216 @@ def fit_to_context(text, before, vocabulary=()):
 
 # Phrases Whisper is known to invent from silence or room noise.
 SILENCE_PHRASES = {
-    "thank you", "thank you very much", "thanks", "thanks for watching", "thank you for watching",
-    "thanks for listening", "thank you for listening", "bye", "bye bye", "you", "okay", "so",
-    "please subscribe", "subtitles by the amaraorg community", "transcription by castingwords",
+    "thank you", "thank you very much", "thanks", "bye", "bye bye", "you", "okay", "so", "yes", "no", "hi", "now",
 }
+# Broadcast/YouTube outro hallucinations Whisper emits during silence (even when prefixed by a prompt name).
+HARD_HALLUCINATION_RE = re.compile(
+    r"(?:"
+    r"we(?:'ll| will) be (?:right )?back(?:\s+(?:to|in)\s+the next video)?"
+    r"|see you (?:all )?(?:in|on|at) the next (?:video|episode|one)"
+    r"|(?:going to |gonna )?go to the next video"
+    r"|thanks? (?:so much |very much )?for (?:watching|listening|viewing)"
+    r"|thank you (?:so much |very much )?for (?:watching|listening|viewing)"
+    r"|(?:please |don't forget to )(?:like and )?subscribe|like and subscribe|subscribe to (?:my|our|the) channel"
+    r"|(?:subtitles|transcribed|transcription|captioned) by\b"
+    r"|amara\.?org|castingwords"
+    r"|you(?:'re| are) watching\b"
+    r"|stay tuned\b"
+    r"|to be continued\b"
+    r"|all rights reserved\b"
+    r"|i(?:'m| am) going to go to the top of the top"
+    r"|^\s*(?:\[|\()?\s*(?:music|applause|laughter|silence|blank_audio|inaudible|no audio)\s*(?:\]|\))?\s*$"
+    r"|♪"
+    r")",
+    re.I,
+)
+# Classic non-sense stutter clauses Whisper generates at non-zero temperature during silence.
+STUTTER_CLAUSE_RE = re.compile(
+    r"\b(?:you (?:don't|can't) (?:can|do) you|i (?:don't )?do(?:,\s*i (?:don't )?do){2,}|you(?:'ll| will) be able,\s*it's)\b",
+    re.I,
+)
 
 
-def keep_segment(segment):
-    """Drop segments Whisper itself marks as probably silent, and its stock silence phrases."""
+def hard_hallucination(sentence):
+    """A stock broadcast/outro line, or one dominating a short sentence. Long real sentences that
+    merely mention "subscribe" or "stay tuned" are kept."""
+    if not HARD_HALLUCINATION_RE.search(sentence):
+        return False
+    return len(re.findall(r"[^\W_][\w']*", sentence)) <= 12
+
+
+def keep_segment(segment, prompt_words=()):
+    """Drop segments Whisper marks as silent, broadcast hallucinations, and prompt-bleed noise."""
     text = str(segment.get("text", "")).strip()
-    silent, confidence = segment.get("no_speech_prob", 0.0), segment.get("avg_logprob", 0.0)
-    if not text or silent > 0.8 or (silent > 0.6 and confidence < -1.0):
+    silent = float(segment.get("no_speech_prob", 0.0) or 0.0)
+    confidence = float(segment.get("avg_logprob", 0.0) or 0.0)
+    compression = float(segment.get("compression_ratio", 0.0) or 0.0)
+    if not text or silent > 0.7 or (silent > 0.45 and confidence < -0.8) or compression > 2.2:
+        return False
+    if hard_hallucination(text):
         return False
     phrase = re.sub(r"[^a-z ]", "", text.casefold()).strip()
-    return not (phrase in SILENCE_PHRASES and (silent > 0.1 or confidence < -0.5))
+    # Relaxed threshold for real short replies ("Thanks.", "Okay.") while catching low-confidence ghosts.
+    if phrase in SILENCE_PHRASES and (silent > 0.35 or confidence < -0.65):
+        return False
+    # Drop prompt-bleed segments composed solely of prompt/vocabulary words + fillers (e.g. "Sooraj, Now. Now. Now.")
+    if prompt_words:
+        words = re.findall(r"[^\W_][\w']*", text.casefold())
+        allowed_noise = set(prompt_words) | SILENCE_PHRASES | {"uh", "uhh", "um", "umm", "hm", "hmm", "hi", "hey"}
+        if words and all(w in allowed_noise for w in words):
+            has_prompt_word = any(w in prompt_words for w in words)
+            repeated = len(words) >= 3 and len(set(words)) <= max(2, len(words) // 2)
+            if has_prompt_word and (silent > 0.2 or confidence < -0.5 or repeated or len(words) <= 2):
+                return False
+    return True
 
 
 def collapse_repeats(text):
-    """Whisper can get stuck repeating itself. Keep one copy of any sentence, or block of up to
-    three sentences, repeated back to back; drop a repeat cut off mid-way; and collapse a short
-    phrase said three or more times in a row."""
-    sentences = [part for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
+    """Whisper can get stuck repeating itself (adjacently or alternating between two hallucinated clauses).
+    Keep one copy of any repeated sentence/block, strip cut-off repeats, and collapse stutter loops."""
+    if not text or not text.strip():
+        return ""
+    # Collapse repeated comma/period-separated short fragments (e.g. "Now. Now. Now. Now.", "I Do, I Do, I Do, I").
+    text = re.sub(r"\b((?:[\w']+[\s,]+){0,6}[\w']+)(?:[\s,.;!?]+\1\b){2,}", r"\1", text, flags=re.I)
+    text = re.sub(r"\b([\w']+(?:\s+[\w']+){1,4}),\s+\1(?:,\s+\1)*(?:,\s+[\w']+(?:\s+[\w']+){0,2})?(?=\s+[A-Z]|[.!?]|$)", r"\1", text, flags=re.I)
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
     keys = [re.sub(r"[^\w']+", " ", part.casefold()).strip() for part in sentences]
+    # Count non-adjacent occurrences of multi-word sentences: 3+ repeats anywhere in one chunk is a decode loop.
+    counts = {}
+    for key in keys:
+        if len(key.split()) >= 2:
+            counts[key] = counts.get(key, 0) + 1
+    seen_loop = set()
     kept, kept_keys, index = [], [], 0
     while index < len(sentences):
+        key = keys[index]
+        if counts.get(key, 0) >= 3:
+            if key in seen_loop:
+                index += 1
+                continue
+            seen_loop.add(key)
         block = next((size for size in (1, 2, 3) if len(kept_keys) >= size and keys[index:index + size] == kept_keys[-size:]
-                      and all(len(key.split()) >= 2 for key in keys[index:index + size])), 0)
+                      and all(len(k.split()) >= 2 for k in keys[index:index + size])), 0)
         if block:
             index += block
             continue
-        words, previous = keys[index].split(), kept_keys[-1].split() if kept_keys else []
+        words, previous = key.split(), kept_keys[-1].split() if kept_keys else []
         cut_off = not re.search(r"[.!?]$", sentences[index]) and len(words) >= 3 and previous[:len(words) - 1] == words[:-1]
-        if keys[index] and not cut_off:
+        if key and not cut_off:
             kept.append(sentences[index])
-            kept_keys.append(keys[index])
+            kept_keys.append(key)
         index += 1
     text = " ".join(kept)
     return re.sub(r"\b((?:[\w']+[\s,]+){0,7}[\w']+)(?:[\s,.;]+\1\b){2,}", r"\1", text, flags=re.I)
+
+
+def scrub_hallucinations(text, vocabulary=()):
+    """Remove Whisper silence hallucinations, stutter loops, and vocabulary prompt-bleed artifacts."""
+    if not text or not text.strip():
+        return ""
+    vocab_words = {
+        w.casefold()
+        for entry in vocabulary
+        for w in re.findall(r"[^\W_][\w']*", str(entry.get("word", "")))
+        if len(w) >= 2
+    }
+    vocab_prefix = ""
+    if vocab_words:
+        vocab_prefix = r"(?:(?:" + "|".join(re.escape(w) for w in sorted(vocab_words, key=len, reverse=True)) + r")[,:\s]+)*"
+
+    # A whole transcript made only of prompt words, fillers and stock replies is an echo of the prompt.
+    every = re.findall(r"[^\W_][\w']*", text.casefold())
+    noise = vocab_words | SILENCE_PHRASES | {"uh", "uhh", "um", "umm", "hm", "hmm", "hey"}
+    if vocab_words and every and all(w in noise for w in every) and any(w in vocab_words for w in every):
+        return ""
+
+    # Split into sentences and drop hallucinated or stutter-loop sentences.
+    raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text.strip()) if s.strip()]
+    kept = []
+    dropped = 0
+    for sent in raw_sentences:
+        if hard_hallucination(sent) or STUTTER_CLAUSE_RE.search(sent):
+            dropped += 1
+            continue
+        # Repeated short token burst like "Sooraj, Now. Now. Now." or "Now, now, now, now."
+        words = re.findall(r"[^\W_][\w']*", sent.casefold())
+        if len(words) >= 4 and len(set(words)) <= 2:
+            dropped += 1
+            continue
+        # Strip hallucinated leading/trailing prompt-name + comma bleed around a clean sentence.
+        if vocab_prefix:
+            cleaned = re.sub(r"^\s*" + vocab_prefix + r"(?=(?:we(?:'ll| will)|you (?:don't|can't|will|'ll)|i(?:'m| am) going to))", "", sent, flags=re.I)
+            if hard_hallucination(cleaned) or STUTTER_CLAUSE_RE.search(cleaned):
+                dropped += 1
+                continue
+        # Standalone trailing/leading orphan prompt word with comma (e.g., "...Sort It. Sooraj,").
+        if vocab_words and len(words) == 1 and words[0] in vocab_words and sent.rstrip().endswith(","):
+            dropped += 1
+            continue
+        # Sentence consisting purely of a prompt name + filler word ("Sooraj, Now." / "Sooraj, hi.").
+        if vocab_words and 1 <= len(words) <= 2 and all(w in vocab_words or w in SILENCE_PHRASES or w in {"uh", "uhh", "um", "umm"} for w in words):
+            if any(w in vocab_words for w in words) and (dropped > 0 or len(raw_sentences) == 1):
+                dropped += 1
+                continue
+        kept.append(sent)
+
+    if not kept:
+        return ""
+    joined = collapse_repeats(" ".join(kept))
+    # If the vast majority of clauses were hallucinations and almost nothing coherent survived, drop all.
+    all_words = re.findall(r"[^\W_][\w']*", joined.casefold())
+    if len(all_words) >= 12 and len(set(all_words)) / len(all_words) < 0.25:
+        return ""
+    if dropped >= 2 and len(all_words) <= 5 and all(w in vocab_words or w in SILENCE_PHRASES or w in {"hi", "i'm", "the", "same"} for w in all_words):
+        return ""
+    # Strip trailing orphan vocabulary word with dangling comma after punctuation.
+    if vocab_words:
+        joined = re.sub(
+            r"(?<=[.!?])\s+(?:" + "|".join(re.escape(w) for w in sorted(vocab_words, key=len, reverse=True)) + r"),\s*$",
+            "",
+            joined,
+            flags=re.I,
+        ).strip()
+    return fix_spurious_title_case(joined, vocabulary)
+
+
+MONTHS_DAYS = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+}
+
+
+def fix_spurious_title_case(text, vocabulary=()):
+    """Whisper occasionally slips into Title Case ('Build While Downloading Looks Like A Mess.').
+    Normalize sentences with >= 6 alphabetic words where >= 65% are Title-Cased back to sentence case."""
+    if not text:
+        return text
+    protected = {w.casefold() for entry in vocabulary for w in re.findall(r"[^\W_][\w']*", str(entry.get("word", "")))}
+    protected |= MONTHS_DAYS | {"i", "i'm", "i've", "i'll", "i'd", "github", "macos", "iphone", "ipad", "youtube", "google", "openai", "claude", "whisper", "qwen", "dictait", "parakeet"}
+
+    def fix_sentence(sent):
+        alpha = re.findall(r"\b[A-Za-z][A-Za-z']*\b", sent)
+        if len(alpha) < 6:
+            return sent
+        title_like = sum(1 for w in alpha if w[0].isupper() and not w.isupper() and len(w) > 1)
+        if title_like / len(alpha) < 0.65:
+            return sent
+        first_seen = False
+
+        def lower_word(match):
+            nonlocal first_seen
+            word = match.group(0)
+            if not first_seen:
+                first_seen = True
+                return word
+            # Keep acronyms (UI, API), known names and terms, and camel-cased names (GitHub).
+            if (word.isupper() and len(word) > 1) or word.casefold() in protected or any(c.isupper() for c in word[1:]):
+                return word
+            return word[0].lower() + word[1:]
+
+        return re.sub(r"\b[A-Za-z][A-Za-z']*\b", lower_word, sent)
+
+    return re.sub(r"[^.!?\n]+[.!?]?", lambda m: fix_sentence(m.group(0)), text)
 
 
 def normalize_dictation(text, deduplicate=False):
@@ -483,37 +798,79 @@ def emit(output, event, **fields):
     output.flush()
 
 
-def read_audio(path):
+def read_audio(path, max_seconds=181):
     """Read native AVAudioRecorder PCM without ffmpeg or shell commands."""
     import numpy as np
 
     with wave.open(str(path), "rb") as audio:
         if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
             raise ValueError("Expected mono 16 kHz, 16-bit PCM WAV audio.")
-        if audio.getnframes() > 16000 * 181:
+        if max_seconds is not None and audio.getnframes() > 16000 * max_seconds:
             raise ValueError("Audio pieces are limited to three minutes; long dictations arrive in chunks.")
         samples = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2")
     return samples.astype(np.float32) / 32768.0
 
 
 def trim_silence(audio):
-    """Energy gate measured against the room's own noise floor, preserving 200 ms around speech.
-    Audio with almost no speech returns empty: breaths and room tone are where Whisper invents
-    phrases like "Thank you." """
+    """Adaptive energy gate with burst validation and interior silence compaction.
+    Preserves 200 ms padding around speech, rejects clicks/breaths/room tone, and compacts
+    interior silence gaps > 0.9 s down to 0.4 s so Whisper cannot hallucinate inside pauses."""
     import numpy as np
 
     if len(audio) < 1600:
         return audio[:0]
-    size = 320
+    size = 320  # 20 ms at 16 kHz
     padded = np.pad(audio, (0, (-len(audio)) % size))
     rms = np.sqrt(np.mean(padded.reshape(-1, size) ** 2, axis=1))
-    threshold = max(0.0015, min(0.008, float(np.percentile(rms, 10)) * 3))
+    noise = float(np.percentile(rms, 15))
+    threshold = max(0.004, min(0.015, noise * 3.5))
+    # Never drop genuine quiet speech when peak is clearly above a quiet room floor.
+    if float(np.max(rms)) < 0.004:
+        return audio[:0]
     active = np.flatnonzero(rms > threshold)
     if len(active) < 8:  # Under 160 ms of sound above the room: nothing was said.
         return audio[:0]
-    start = max(0, int(active[0] * size) - 3200)
-    end = min(len(audio), int((active[-1] + 1) * size) + 3200)
-    return audio[start:end]
+    # Group nearby active frames (within 200 ms = 10 frames) into voiced bursts and reject isolated clicks (< 100 ms).
+    bursts = []
+    b_start = int(active[0])
+    b_prev = int(active[0])
+    b_count = 1
+    for frame in active[1:]:
+        idx = int(frame)
+        if idx - b_prev <= 10:
+            b_prev = idx
+            b_count += 1
+        else:
+            if b_count >= 5:
+                bursts.append((b_start, b_prev))
+            b_start = b_prev = idx
+            b_count = 1
+    if b_count >= 5:
+        bursts.append((b_start, b_prev))
+    if not bursts:
+        return audio[:0]
+    # Merge bursts separated by < 0.9 s (45 frames) so natural speech pauses stay untouched;
+    # compact longer interior silence gaps down to 0.4 s (200 ms padding on each side).
+    merged = [bursts[0]]
+    for start_f, end_f in bursts[1:]:
+        prev_start, prev_end = merged[-1]
+        if start_f - prev_end < 45:
+            merged[-1] = (prev_start, end_f)
+        else:
+            merged.append((start_f, end_f))
+    if len(merged) == 1:
+        start = max(0, merged[0][0] * size - 3200)
+        end = min(len(audio), (merged[0][1] + 1) * size + 3200)
+        return audio[start:end]
+    slices = []
+    for start_f, end_f in merged:
+        s = max(0, start_f * size - 3200)
+        e = min(len(audio), (end_f + 1) * size + 3200)
+        if slices and s <= slices[-1][1]:
+            slices[-1] = (slices[-1][0], max(slices[-1][1], e))
+        else:
+            slices.append((s, e))
+    return np.concatenate([audio[s:e] for s, e in slices])
 
 
 # Words a speaker uses to enumerate a list: "number one", "3.", "second", "finally".
@@ -784,6 +1141,7 @@ class Engine:
         self.stt = self.llm = self.tokenizer = None
         self.cleanup_error = None
         self.vocabulary = []
+        self.prompt_words = set()
         self.detected_language = None
         self.examples = []
         self.smart_formatting = True
@@ -866,25 +1224,26 @@ class Engine:
                 intent, "Preserve all content; do not summarize or create lists unless the content clearly has a list structure."
             )
         messages = [{"role": "system", "content": instructions + context}]
+        tag = lambda body: f"<dictation>\n{body}\n</dictation>"
         if intent == "cleanup":
             messages.extend([
-                {"role": "user", "content": "I I need to meet Maya on Monday, no, Tuesday. Um, keep it quick."},
+                {"role": "user", "content": tag("I I need to meet Maya on Monday, no, Tuesday. Um, keep it quick.")},
                 {"role": "assistant", "content": "I need to meet Maya on Tuesday. Keep it quick."},
-                {"role": "user", "content": "The package arrived this morning."},
+                {"role": "user", "content": tag("The package arrived this morning.")},
                 {"role": "assistant", "content": "<unchanged>"},
             ])
         elif intent == "prompt":
             messages.extend([
-                {"role": "user", "content": "So um I want you to fix the login page, like when you refresh it logs you out, and "
-                                            "make sure you don't change the API, and also add a test for it."},
+                {"role": "user", "content": tag("So um I want you to fix the login page, like when you refresh it logs you out, and "
+                                                "make sure you don't change the API, and also add a test for it.")},
                 {"role": "assistant", "content": "Fix the login page so refreshing it no longer logs you out.\n- Don't change the API.\n- Add a test for it."},
             ])
         elif intent in {"bullets", "summary_bullets"}:
             messages.extend([
-                {"role": "user", "content": "We need a local Mac app with linked notes. We want it to start at login. It should start automatically at login."},
+                {"role": "user", "content": tag("We need a local Mac app with linked notes. We want it to start at login. It should start automatically at login.")},
                 {"role": "assistant", "content": "- We need a local Mac app with linked notes.\n- It should start automatically at login."},
             ])
-        messages.append({"role": "user", "content": text})
+        messages.append({"role": "user", "content": tag(text)})
         return self.tokenizer.apply_chat_template(
             messages,
             tokenize=True, add_generation_prompt=True, enable_thinking=False,
@@ -895,27 +1254,31 @@ class Engine:
         dictation so far. Whisper continues from it, which keeps names and spelling consistent."""
         if self.backend == "parakeet":
             self.detected_language = None if language == "auto" else language
-            return self.parakeet_transcribe(audio).strip()
-        glossary = ", ".join(e["word"] for e in self.vocabulary[:40] if e.get("word"))
+            return scrub_hallucinations(self.parakeet_transcribe(audio).strip(), self.vocabulary)
+        words = [e["word"] for e in self.vocabulary[:40] if e.get("word")]
+        glossary = ", ".join(words)
         hint = " ".join(part for part in [glossary + "." if glossary else "", previous[-200:].strip()] if part)
         prompt = hint[-500:] or None
+        # Words Whisper may echo back from its prompt during silence ("Sooraj, now now").
+        self.prompt_words = {w.casefold() for word in words for w in re.findall(r"[^\W_][\w']*", word) if len(w) >= 2}
         language = None if language == "auto" else language
         if language is None:
             # Auto detection and decoding can share an encoder pass for a complete short clip.
             text, language = self.whisper_single_window(audio, prompt)
             if text is not None:
                 self.detected_language = language
-                return collapse_repeats(text)
+                return scrub_hallucinations(collapse_repeats(text), self.vocabulary)
         result = self.stt.transcribe(
             audio, path_or_hf_repo=WHISPER, language=language,
             # Greedy first; Whisper re-decodes only a stretch that comes out repetitive or unsure.
-            temperature=(0.0, 0.2, 0.4, 0.6), compression_ratio_threshold=2.4, logprob_threshold=-1.0,
+            # Higher-temperature retries are where silence turns into "You Don't Can You" loops.
+            temperature=(0.0, 0.2), compression_ratio_threshold=2.4, logprob_threshold=-1.0,
             no_speech_threshold=0.6, condition_on_previous_text=False, verbose=None,
             word_timestamps=False, initial_prompt=prompt,
         )
         self.detected_language = result.get("language")
-        segments = [s["text"].strip() for s in result.get("segments", []) if keep_segment(s)]
-        return collapse_repeats(" ".join(segments).strip())
+        segments = [s["text"].strip() for s in result.get("segments", []) if keep_segment(s, self.prompt_words)]
+        return scrub_hallucinations(collapse_repeats(" ".join(segments).strip()), self.vocabulary)
 
     def whisper_single_window(self, audio, prompt):
         import mlx.core as mx
@@ -969,7 +1332,7 @@ class Engine:
             for start, end in zip(timestamps[::2], timestamps[1::2]):
                 text = tokenizer.decode(result.tokens[start + 1:end]).strip()
                 segment = {"text": text, "no_speech_prob": result.no_speech_prob, "avg_logprob": result.avg_logprob}
-                if keep_segment(segment):
+                if keep_segment(segment, self.prompt_words):
                     segments.append(text)
             if segments:
                 return " ".join(segments), language
@@ -1026,7 +1389,8 @@ class Engine:
             stream.close()
         if last is not None and last.finish_reason == "length":
             return (list_fallback, None) if list_fallback else (text, "Used original transcript because the edit was incomplete.")
-        edited = "".join(parts).strip()
+        # The model sometimes echoes the wrapper; tags are never part of the text.
+        edited = re.sub(r"</?dictation>", "", "".join(parts)).strip()
         if intent == "cleanup" and edited == "<unchanged>":
             edited = content
         edited = preserve_space_shortcut(content, edited)

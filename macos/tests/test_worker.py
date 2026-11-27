@@ -346,6 +346,38 @@ class WorkerTests(unittest.TestCase):
         similar = "Who climbed first? Who climbed second? Who climbed third?"
         self.assertEqual(worker.collapse_repeats(similar), similar)
 
+    def test_silence_garbage_from_a_real_session_is_removed(self):
+        vocab = [{"word": "Sooraj"}, {"word": "Satheesan"}, {"word": "Truffaire"}]
+        garbage = ("Sooraj, We'll be right back. Sooraj, We'll be right back. Hi, I'm the same. Sooraj, We'll be right back. "
+                   "Sooraj, You Don't Can You, You Don't Can You, You Don't Sooraj, You'll Be Able, It's Sooraj, You'll Be "
+                   "Sooraj, We'll be back to the next video. Sooraj, We'll be right back. Sooraj, You Can't Do, I Do, I Do, I Do, I "
+                   "Sooraj, We'll be right back.")
+        self.assertEqual(worker.scrub_hallucinations(garbage, vocab), "")
+        self.assertEqual(worker.scrub_hallucinations("Sooraj, Now. Now. Now. Now.", vocab), "")
+        # Real speech around a hallucinated outro survives, and the outro goes.
+        mixed = "Ship the build on Friday. Thanks for watching."
+        self.assertEqual(worker.scrub_hallucinations(mixed, vocab), "Ship the build on Friday.")
+
+    def test_real_sentences_that_mention_outro_words_are_kept(self):
+        vocab = [{"word": "Sooraj"}]
+        for text in ["You'll be fine once the build finishes.",
+                     "Please subscribe to the newsletter so the team gets release notes every Friday morning.",
+                     "Sooraj will review the pull request tomorrow.",
+                     "Thanks, Maya."]:
+            self.assertEqual(worker.scrub_hallucinations(text, vocab), text)
+
+    def test_prompt_words_alone_in_a_doubtful_segment_are_dropped(self):
+        words = {"sooraj", "truffaire"}
+        self.assertFalse(worker.keep_segment({"text": " Sooraj, now.", "no_speech_prob": 0.3, "avg_logprob": -0.6}, words))
+        self.assertTrue(worker.keep_segment({"text": " Sooraj, call Truffaire.", "no_speech_prob": 0.02, "avg_logprob": -0.2}, words))
+
+    def test_title_case_drift_is_lowered_but_names_stay(self):
+        fixed = worker.fix_spurious_title_case("Build While Downloading Looks Like A Mess For Maya On GitHub.", [{"word": "Maya"}])
+        self.assertTrue(fixed.startswith("Build while downloading looks like a mess"))
+        self.assertIn("Maya", fixed)
+        self.assertIn("GitHub", fixed)
+        self.assertEqual(worker.fix_spurious_title_case("Send the UI notes to Priya today."), "Send the UI notes to Priya today.")
+
     def test_stock_silence_phrases_are_dropped_but_real_thanks_kept(self):
         self.assertFalse(worker.keep_segment({"text": " Thank you.", "no_speech_prob": 0.4, "avg_logprob": -0.3}))
         self.assertTrue(worker.keep_segment({"text": " Thank you.", "no_speech_prob": 0.01, "avg_logprob": -0.2}))

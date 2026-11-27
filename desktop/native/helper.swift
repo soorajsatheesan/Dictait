@@ -473,7 +473,14 @@ func focus() -> [String: Any] {
         result["app"] = focusedApp.bundleIdentifier ?? ""
         result["appName"] = focusedApp.localizedName ?? ""
     }
-    if let window = found.window { result["window"] = String(string(window, kAXTitleAttribute).prefix(200)) }
+    if let window = found.window {
+        result["window"] = String(string(window, kAXTitleAttribute).prefix(200))
+        let doc = string(window, kAXDocumentAttribute)
+        if !doc.isEmpty { result["document"] = String(doc.prefix(500)) }
+    }
+    if let url = found.page, !url.isEmpty {
+        result["url"] = String(url.prefix(500))
+    }
     let kind = editable(element)
     if let kind { result["editable"] = kind }
     guard kind == true, role != "AXWebArea" else { return result }

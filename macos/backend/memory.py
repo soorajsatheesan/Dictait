@@ -150,7 +150,7 @@ class MemoryStore:
         safe = re.sub(r'[\x00-\x1f/\\:*?"<>|#\[\]]', "_", term).strip(" .")[:70]
         return f"{safe or 'Term'}-{term_id}"
 
-    def write_note(self, note_id, destination=None, refresh_graph=True):
+    def write_note(self, note_id, destination=None, refresh_graph=False):
         """Incrementally maintain a live Obsidian-compatible vault after each dictation."""
         automatic = destination is None
         destination = Path(destination) if destination else self.path.parent / "Notes"
@@ -235,30 +235,70 @@ class MemoryStore:
         self.refresh_graph(destination)
         return self.stats()
 
+    def delete_note(self, note_id):
+        """Delete a single note from SQLite, FTS5 and its generated Markdown file."""
+        row = self.db.execute("SELECT created FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row is None:
+            return False
+        created = row[0]
+        with self.db:
+            self.db.execute("DELETE FROM note_terms WHERE note_id=?", (note_id,))
+            self.db.execute("DELETE FROM note_search WHERE id=?", (note_id,))
+            self.db.execute("DELETE FROM notes WHERE id=?", (note_id,))
+        title = time.strftime("%Y-%m-%d %H-%M-%S", time.localtime(created))
+        md = self.path.parent / "Notes" / f"Dictation {title}-{note_id[:8]}.md"
+        try:
+            md.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return True
+
+    def update_note(self, note_id, body):
+        """Update a note's body in SQLite, FTS5 and its Markdown file."""
+        body = body.strip()
+        if not body:
+            return False
+        row = self.db.execute("SELECT created FROM notes WHERE id=?", (note_id,)).fetchone()
+        if row is None:
+            return False
+        with self.db:
+            self.db.execute("UPDATE notes SET body=? WHERE id=?", (body, note_id))
+            self.db.execute("DELETE FROM note_search WHERE id=?", (note_id,))
+            self.db.execute("INSERT INTO note_search(id,body) VALUES(?,?)", (note_id, body))
+        self.write_note(note_id, refresh_graph=False)
+        return True
+
     def close(self):
         self.db.close()
 
 
-# Everyday words that start sentences or get capitalized are never names or terms.
+# Everyday words and spoken fillers that must never become vocabulary terms or Whisper hints.
 COMMON = set("""
-a about actually add after again ah all also am an and any are as ask at back bad be because been before being both but by
-call can check clean close come could day did do does done dude each eight even every fine first five for four from get give go
-going good got great had has have he hello her here hey hi him his how i if in is it its just keep know last let like look made
-make many maybe me more most much my need new next nice nine no not now number of off ok okay old on one only or other our out
-over please point put read really right run said same say second see send set seven she should show six so some start still
-stop such sure take tell ten test than thank thanks that the their them then there these they thing think third this those
-three through to today tomorrow too try turn two um uh up us use very want was we well were what when where which who why will
-with would write yeah yes yesterday yet you your monday tuesday wednesday thursday friday saturday sunday
+a about actually add after again ah ahh all alright also am an and any anything are as ask at awesome back bad basically be because
+been before being both build bureau but by call can check clean close come cool could day definitely did do does done dude each
+eight er erm even every everyone everything fine first five for four from get give go going good got great guys had has have he
+hello her here hey hi him his hmm hmmm how i if in into is it its just keep kind know last left let like literally little look looks
+made make many maybe mean mess mine more most much my need needed new next nice nine no nope not now number of off oh ohh ok okay
+old on one only or other our ours out over please point pretty probably put read really right run said same say second section
+sections see send set seven she should show six so someone something soon sooo sort start still stop stuff such sure take tell ten
+test than thank thanks that the their them then there these they thing things think third this those three through to today tomorrow
+too try turn two uh uhh uhhh um umm ummm up us use very want was we well were what when where which who why will with would write
+yeah yep yes yesterday yet you your monday tuesday wednesday thursday friday saturday sunday
 """.split())
 
 
 WORD_RE = re.compile(r"[^\W_][\w'\u0900-\u097f]*")
+FILLER_TERM_RE = re.compile(r"^(?:u+h+|u+m+|h+m+|s+o+|a+h+|o+h+|e+r+m*|y+e+a+h*|([a-z])\1{2,})$", re.I)
+
+
+def _is_filler(word):
+    return word in COMMON or bool(FILLER_TERM_RE.match(word))
 
 
 def meaningful(term):
-    """A learned term worth keeping: at least one word that is not an everyday word."""
+    """A learned term worth keeping: at least one word that is not an everyday word or filler."""
     words = WORD_RE.findall(term.casefold())
-    return bool(words) and any(word not in COMMON for word in words)
+    return bool(words) and any(not _is_filler(word) for word in words)
 
 
 @functools.lru_cache(maxsize=1)
@@ -271,27 +311,48 @@ def dictionary():
         return frozenset()
 
 
+def in_dictionary(word):
+    """True for an everyday English word, including plurals and verb forms of the macOS word list's
+    base forms ("factories", "changes", "downloading")."""
+    words = dictionary()
+    if word in words:
+        return True
+    stems = []
+    if word.endswith("ies"): stems.append(word[:-3] + "y")
+    if word.endswith("es"): stems.append(word[:-2])
+    if word.endswith("s"): stems.append(word[:-1])
+    if word.endswith("ed"): stems += [word[:-2], word[:-1]]
+    if word.endswith("ing"): stems += [word[:-3], word[:-3] + "e"]
+    return any(len(stem) >= 3 and stem in words for stem in stems)
+
+
 def name_like(term):
-    """A guessed term must contain a word that is neither everyday nor in the dictionary, so a
-    capitalized "Climb" or "Who" never becomes a spelling hint, while "GitHub", "Everest" or Hindi names can."""
+    """A guessed term must contain a word that is neither everyday, filler, nor in the dictionary,
+    so a capitalized "Climb", "Things", "Uhh" or "Who" never becomes a spelling hint."""
     words = WORD_RE.findall(term.casefold())
-    if not words or all(word in COMMON for word in words):
+    if not words or all(_is_filler(word) for word in words):
         return False
     if len(words) == 1:
-        return words[0] not in dictionary()
-    # "Whisper Turbo" reads as a name; "To Climb" is a capitalized phrase.
-    return not any(word in COMMON for word in words) or any(word not in COMMON and word not in dictionary() for word in words)
+        return not in_dictionary(words[0])
+    # "Whisper Turbo" reads as a name; "To Climb" or "Needed Things" is an ordinary capitalized phrase.
+    return not any(_is_filler(word) for word in words) or any(not _is_filler(word) and not in_dictionary(word) for word in words)
 
 
 def fallback_entities(text):
     # A conservative fallback if entity extraction is unavailable or over budget.
+    # Skip sentences that look like Whisper Title-Case drift (>65% capitalized words).
     candidates = []
-    for match in re.findall(r"\b(?:[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){0,2}|[a-z]+[A-Z][a-zA-Z0-9]*)\b", text):
-        words = match.split()
-        while words and words[0].casefold() in COMMON:  # "So Maya" → "Maya"
-            words.pop(0)
-        while words and words[-1].casefold() in COMMON:
-            words.pop()
-        if words:
-            candidates.append(" ".join(words))
+    for sentence in re.split(r"(?<=[.!?\n])\s+", text):
+        # Title-Case drift capitalizes nearly every word after the first; real names are a minority.
+        alpha = re.findall(r"\b[A-Za-z]{2,}\b", sentence)[1:]
+        if len(alpha) >= 5 and sum(1 for w in alpha if w[0].isupper() and not w.isupper()) / len(alpha) >= 0.8:
+            continue
+        for match in re.findall(r"\b(?:[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){0,2}|[a-z]+[A-Z][a-zA-Z0-9]*)\b", sentence):
+            words = match.split()
+            while words and _is_filler(words[0].casefold()):  # "So Maya" → "Maya"
+                words.pop(0)
+            while words and _is_filler(words[-1].casefold()):
+                words.pop()
+            if words:
+                candidates.append(" ".join(words))
     return [{"term": term, "kind": "term"} for term in dict.fromkeys(candidates) if name_like(term)][:24]

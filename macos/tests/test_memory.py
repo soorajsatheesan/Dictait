@@ -82,7 +82,8 @@ class MemoryTests(unittest.TestCase):
         first = self.memory.remember(text, [{"term": "Dictait"}, {"term": "Qwen"}], save_note=True)
         self.memory.write_note(first)
         second = self.memory.remember("Another Dictait reference", [{"term": "Dictait"}], save_note=True)
-        self.memory.write_note(second)
+        # The standalone graph is written on request (Obsidian export), not after every dictation.
+        self.memory.write_note(second, refresh_graph=True)
         folder = self.memory.path.parent / "Notes"
         graph = (folder / "graph.html").read_text()
         encoded = re.search(r'<script id="memory-data" type="application/json">(.*?)</script>', graph, re.S).group(1)

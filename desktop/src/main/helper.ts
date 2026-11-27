@@ -1,6 +1,8 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { paths } from './paths'
+import { closeSync, mkdirSync, openSync, statSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { paths, SUPPORT } from './paths'
 import type { ModifierKey } from '@shared/shortcuts'
 import type { Destination } from '@shared/types'
 
@@ -13,6 +15,10 @@ export interface FocusInfo {
   secure?: boolean
   /** The focused window's title, which tells a browser's Gmail from its ChatGPT. Never saved. */
   window: string
+  /** Browser page URL when inside an AXWebArea, for URL-aware Power Modes. Never saved. */
+  url?: string
+  /** Active file/project path from AXDocument when inside an IDE/editor. Never saved. */
+  document?: string
 }
 
 /** Delivery into the field that has focus when the text is ready. */
@@ -48,6 +54,7 @@ export type MediaHold = Record<string, unknown>
 export class NativeHelper extends EventEmitter {
   lastDeliveryDestination: Destination | null = null
   private child: ChildProcessWithoutNullStreams | null = null
+  private log: number | null = null
   private next = 1
   private pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; timer: NodeJS.Timeout }>()
   private hotkeys: HotKeySpec[] = []
@@ -58,7 +65,16 @@ export class NativeHelper extends EventEmitter {
     if (this.child || this.stopped) return
     let child: ChildProcessWithoutNullStreams
     try {
-      child = spawn(paths.helper, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'] }) as unknown as ChildProcessWithoutNullStreams
+      let stderr: number | 'ignore' = 'ignore'
+      try {
+        mkdirSync(SUPPORT, { recursive: true })
+        const logPath = join(SUPPORT, 'helper.log')
+        try { if (statSync(logPath).size > 512_000) unlinkSync(logPath) } catch { /* no log yet */ }
+        if (this.log !== null) { try { closeSync(this.log) } catch { /* ignore */ } }
+        this.log = openSync(logPath, 'a')
+        stderr = this.log
+      } catch { stderr = 'ignore' }
+      child = spawn(paths.helper, ['serve'], { stdio: ['pipe', 'pipe', stderr] }) as unknown as ChildProcessWithoutNullStreams
     } catch {
       return
     }
