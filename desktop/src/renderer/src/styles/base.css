@@ -1,91 +1,105 @@
-/* Dictait — "Graphite & Ember".
-   Cool graphite neutrals so the one warm color, ember, always means voice, live, or yours. */
+/* Dictait — "Graphite".
+   Near-black and hairlines, Geist for words, Geist Mono for numbers and labels, Doto for the big
+   dot-matrix moments. Colour is rationed: signal red only ever means the microphone is live. */
 
 :root {
   color-scheme: light dark;
 
-  --font-display: 'Bricolage Grotesque Variable', ui-sans-serif, -apple-system, system-ui, sans-serif;
-  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-ui: 'Geist Variable', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: 'Geist Variable', -apple-system, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-dot: 'Doto Variable', 'Geist Mono Variable', ui-monospace, monospace;
 
-  --ember: #F4522B;
-  --ember-hi: #FF7246;
-  --ember-text: #CF3D16;
-  --ember-soft: rgba(244, 82, 43, 0.10);
-  --ember-line: rgba(244, 82, 43, 0.32);
-  /* The logo's own gradient: apricot to ember. */
-  --ember-gradient: linear-gradient(90deg, #FF9456 0%, #FF5B36 58%, #F2401F 100%);
-  --apricot: #FF9456;
-  --on-ember: #FFFFFF;
-
-  --bg: #F6F6F7;
-  --bg-sidebar: #EDEDEF;
+  /* Light */
+  --bg: #F4F4F3;
+  --bg-sidebar: #ECECEA;
   --surface: #FFFFFF;
-  --surface-2: #F1F1F3;
-  --surface-3: #E7E7EA;
-  --inverse: #141518;
-  --on-inverse: #F4F4F5;
-  --line: rgba(17, 18, 22, 0.075);
-  --line-strong: rgba(17, 18, 22, 0.13);
-  --text: #131417;
-  --text-2: #5B5D66;
-  --text-3: #8E909A;
-  --good: #16A36A;
-  --warn: #C27A05;
-  --bad: #D93A3A;
+  --surface-2: #F0F0EE;
+  --surface-3: #E5E5E2;
+  --line: rgba(10, 10, 10, 0.08);
+  --line-strong: rgba(10, 10, 10, 0.15);
+  --text: #0A0A0A;
+  --text-2: #5A5A58;
+  --text-3: #9A9A96;
+  --inverse: #0A0A0A;
+  --on-inverse: #F4F4F3;
+  --grid-dot: rgba(10, 10, 10, 0.09);
 
-  --shadow-sm: 0 1px 2px rgba(16, 17, 20, 0.06), 0 0 0 1px rgba(16, 17, 20, 0.04);
-  --shadow-md: 0 1px 2px rgba(16, 17, 20, 0.05), 0 6px 20px -6px rgba(16, 17, 20, 0.14), 0 0 0 1px rgba(16, 17, 20, 0.05);
-  --shadow-lg: 0 24px 60px -18px rgba(16, 17, 20, 0.32), 0 0 0 1px rgba(16, 17, 20, 0.06);
-  --focus: 0 0 0 3px rgba(244, 82, 43, 0.28);
+  --signal: #F2301F;
+  --signal-text: #D42A1B;
+  --signal-soft: rgba(242, 48, 31, 0.09);
+  --signal-line: rgba(242, 48, 31, 0.32);
+  --good: #12A150;
+  --warn: #B87503;
+  --bad: #D93025;
+
+  /* Interactive accent is the ink itself: monochrome, never a second hue. */
+  --accent: var(--text);
+  --on-accent: var(--bg);
+  --accent-soft: rgba(10, 10, 10, 0.05);
+  --accent-line: rgba(10, 10, 10, 0.28);
+
+  --shadow-sm: 0 0 0 1px var(--line);
+  --shadow-md: 0 0 0 1px var(--line), 0 8px 24px -12px rgba(0, 0, 0, 0.14);
+  --shadow-lg: 0 0 0 1px var(--line-strong), 0 28px 60px -24px rgba(0, 0, 0, 0.3);
+  --focus: 0 0 0 1px var(--bg), 0 0 0 3px rgba(10, 10, 10, 0.35);
 
   --kind-person: #2F7FE0;
   --kind-project: #E8521C;
-  --kind-organization: #8A5CF0;
-  --kind-technical: #0FA388;
-  --kind-topic: #C98A00;
+  --kind-organization: #7C5CF0;
+  --kind-technical: #0E9F84;
+  --kind-topic: #B88300;
   --kind-term: #7C8190;
 
-  --radius-sm: 7px;
-  --radius: 11px;
-  --radius-lg: 16px;
+  --radius-sm: 6px;
+  --radius: 9px;
+  --radius-lg: 14px;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  /* Legacy names, mapped onto the new system. */
+  --ember: var(--accent);
+  --ember-text: var(--text);
+  --ember-soft: var(--accent-soft);
+  --ember-line: var(--accent-line);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ember: #FF6233;
-    --ember-hi: #FF8A5C;
-    --ember-text: #FF8A5C;
-    --ember-soft: rgba(255, 98, 51, 0.13);
-    --ember-line: rgba(255, 98, 51, 0.38);
+    --bg: #09090A;
+    --bg-sidebar: #050506;
+    --surface: #111113;
+    --surface-2: #17171A;
+    --surface-3: #212125;
+    --line: rgba(255, 255, 255, 0.07);
+    --line-strong: rgba(255, 255, 255, 0.13);
+    --text: #EDEDEE;
+    --text-2: #9F9FA5;
+    --text-3: #606067;
+    --inverse: #EDEDEE;
+    --on-inverse: #09090A;
+    --grid-dot: rgba(255, 255, 255, 0.075);
 
-    --bg: #0E0F11;
-    --bg-sidebar: #08090A;
-    --surface: #16171A;
-    --surface-2: #1C1D21;
-    --surface-3: #25272C;
-    --inverse: #F2F2F4;
-    --on-inverse: #121316;
-    --line: rgba(255, 255, 255, 0.065);
-    --line-strong: rgba(255, 255, 255, 0.11);
-    --text: #EDEDEF;
-    --text-2: #A3A5AE;
-    --text-3: #6D7079;
-    --good: #3DD68C;
+    --signal: #FF3B2F;
+    --signal-text: #FF6A5F;
+    --signal-soft: rgba(255, 59, 47, 0.12);
+    --signal-line: rgba(255, 59, 47, 0.4);
+    --good: #32D583;
     --warn: #F5B544;
-    --bad: #FF6464;
+    --bad: #FF6259;
 
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
-    --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -8px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06);
-    --shadow-lg: 0 30px 70px -20px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
-    --focus: 0 0 0 3px rgba(255, 98, 51, 0.35);
+    --accent-soft: rgba(255, 255, 255, 0.06);
+    --accent-line: rgba(255, 255, 255, 0.3);
 
-    --kind-person: #5EB0FF;
+    --shadow-sm: 0 0 0 1px var(--line);
+    --shadow-md: 0 0 0 1px var(--line), 0 10px 30px -12px rgba(0, 0, 0, 0.7);
+    --shadow-lg: 0 0 0 1px var(--line-strong), 0 30px 70px -20px rgba(0, 0, 0, 0.85);
+    --focus: 0 0 0 1px var(--bg), 0 0 0 3px rgba(255, 255, 255, 0.4);
+
+    --kind-person: #6AB4FF;
     --kind-project: #FF7A4D;
-    --kind-organization: #B79BFF;
+    --kind-organization: #A98BFF;
     --kind-technical: #3DD6B0;
-    --kind-topic: #F5C451;
+    --kind-topic: #F2C14E;
     --kind-term: #9AA0AE;
   }
 }
@@ -99,26 +113,36 @@ body {
   background: transparent;
   color: var(--text);
   font: 13px/1.45 var(--font-ui);
+  letter-spacing: -0.006em;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  font-feature-settings: 'cv11', 'ss01';
+  font-feature-settings: 'ss01', 'cv11';
   overflow: hidden;
   user-select: none;
   cursor: default;
 }
 
-button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
-input, textarea { font: inherit; color: inherit; }
-::selection { background: var(--ember-soft); color: inherit; }
+button { font: inherit; color: inherit; letter-spacing: inherit; background: none; border: 0; padding: 0; cursor: default; }
+input, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
+::selection { background: color-mix(in srgb, var(--text) 18%, transparent); color: inherit; }
 :focus { outline: none; }
 :focus-visible { outline: none; box-shadow: var(--focus); }
 
-.display { font-family: var(--font-display); font-optical-sizing: auto; letter-spacing: -0.02em; }
-.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.eyebrow { font-size: 10.5px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+.display { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.04em; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.dot-type { font-family: var(--font-dot); font-weight: 700; letter-spacing: 0.02em; }
+.eyebrow { font: 500 10px/1.2 var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-3); }
 .muted { color: var(--text-2); }
 .faint { color: var(--text-3); }
 .selectable { user-select: text; cursor: text; }
+
+/* A status light: a small square that glows only when it means something. */
+.led { display: inline-block; width: 6px; height: 6px; flex: none; border-radius: 1.5px; background: var(--text-3); }
+.led.good { background: var(--good); box-shadow: 0 0 8px color-mix(in srgb, var(--good) 60%, transparent); }
+.led.live { background: var(--signal); box-shadow: 0 0 8px color-mix(in srgb, var(--signal) 70%, transparent); animation: led-blink 1.4s ease-in-out infinite; }
+.led.warn { background: var(--warn); }
+.led.busy { background: var(--text-2); animation: led-blink 0.9s ease-in-out infinite; }
+@keyframes led-blink { 50% { opacity: 0.3; } }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: transparent; border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }

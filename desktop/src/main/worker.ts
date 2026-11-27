@@ -19,8 +19,8 @@ export class ModelWorker {
       throw new Error('The speech engine is missing. Reinstall Dictait, or run install-macos.sh from the source.')
     }
     if (!existsSync(paths.worker)) throw new Error('The model worker is missing. Reinstall Dictait.')
-    const token = ++this.generation
     const prior = this.stop()
+    const token = this.generation
     const launch = () => {
       if (token !== this.generation) return
       this.spawnWorker(backend, cleanup, token)

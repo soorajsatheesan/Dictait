@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef } from 'react'
-import { AlertTriangle, AudioLines, BookA, Cpu, Mic, NotebookText, RotateCw, Settings2, Waypoints, GraduationCap, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, BookA, NotebookText, RotateCw, Settings2, Waypoints, GraduationCap, type LucideIcon } from 'lucide-react'
 import type { AppState, Phase, Section } from '@shared/types'
 import { clock } from '../lib/format'
 import { gentle, snappy } from '../lib/motion'
@@ -34,6 +34,7 @@ export function Sidebar({ section, onNavigate, state, counts }: {
       <div className="brand">
         <Mark size={22} />
         <span className="display brand-name">Dictait</span>
+        {state && <span className="brand-version">v{state.version}</span>}
       </div>
       <nav className="nav" aria-label="Sections">
         {sections.map(({ id, label, icon: Icon, key }) => {
@@ -69,16 +70,13 @@ function StatusLine({ state }: { state: AppState }) {
   const model = state.settings.backend === 'whisper' ? 'Whisper Turbo' : 'Parakeet'
   return (
     <div className="status-line">
-      <span className={`status-icon ${copy.tone}`} aria-hidden>
-        {copy.tone === 'good' ? <Cpu size={13} strokeWidth={2.2} /> : copy.tone === 'live' ? <AudioLines size={13} strokeWidth={2.2} />
-          : copy.tone === 'warn' ? <AlertTriangle size={13} strokeWidth={2.2} /> : <span className="status-spin" />}
-      </span>
+      <span className={`led ${copy.tone === 'good' ? 'good' : copy.tone === 'live' ? 'live' : copy.tone === 'warn' ? 'warn' : 'busy'}`} aria-hidden />
       <AnimatePresence mode="popLayout" initial={false}>
         <motion.span key={copy.title} className="status-title" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={snappy}>
           {copy.title}
         </motion.span>
       </AnimatePresence>
-      <span className="status-model">{model} · on-device</span>
+      <span className="status-model">{model} · on device</span>
     </div>
   )
 }
@@ -103,7 +101,7 @@ function RecordButton({ state }: { state: AppState }) {
       <motion.button type="button" className={`record ${recording ? 'recording' : ''} ${busy ? 'busy' : ''}`} disabled={busy}
         onClick={() => api.toggleRecording()} layout transition={snappy} aria-label={recording ? 'Finish dictation' : 'Start dictation'}>
         {busy && <span className="record-sweep" aria-hidden />}
-        <span className="record-orb" aria-hidden>{recording ? <span className="record-stop" /> : <Mic size={15} strokeWidth={2.4} className="record-mic" />}</span>
+        <span className="record-orb" aria-hidden />
         <AnimatePresence mode="popLayout" initial={false}>
           <motion.span key={recording ? 'rec' : busy ? phase : 'idle'} className="record-label"
             initial={{ opacity: 0, y: 8, filter: 'blur(2px)' }} animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }} exit={{ opacity: 0, y: -8, filter: 'blur(2px)' }} transition={snappy}>

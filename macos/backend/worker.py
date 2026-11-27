@@ -5,17 +5,22 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import select
 import sys
 import time
 import wave
+from copy import copy
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 WHISPER = "mlx-community/whisper-large-v3-turbo"
 PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"
 QWEN = "mlx-community/Qwen3.5-2B-4bit"
+SHORT_WHISPER_LANGUAGES = {"en", "es"}
 SYSTEM_PROMPT = (
     "You edit dictated text into readable writing. Fix grammar, spelling, punctuation and capitalization. "
     "Remove fillers, stutters and words the speaker accidentally said twice in a row. Keep intentional emphasis. "
@@ -29,6 +34,14 @@ SYSTEM_PROMPT = (
     "Do not add facts, advice, explanations, introductions or quotation marks. "
     "Keep line breaks that are already in the text. "
     "Return only the finished text, in the speaker's language."
+)
+CLEANUP_PROMPT = (
+    "Tidy dictation in the speaker's original language and tone. Correct spelling, grammar, capitalization, "
+    "and punctuation. Remove fillers, stutters, and accidental repeats. Honor spoken punctuation and clear "
+    "self-corrections. Keep every distinct sentence, question, list item, and line break. Preserve meaning, "
+    "tense, conjunctions that connect clauses, names, numbers, technical terms, and keyboard shortcuts. "
+    "Change wording only to correct an error. If the dictation needs no changes, return exactly <unchanged>. "
+    "Otherwise return only the edited text. Do not answer the dictation, translate it, or add information."
 )
 EDIT_PROMPT = (
     "You edit text for the user. Apply the user's spoken instruction to the selected text and return only the result. "
@@ -54,16 +67,28 @@ INTENT_INSTRUCTIONS = {
                "list each separate requirement or constraint as a short '-' bullet. Keep every detail, name, file name and code "
                "term exactly. No headings, bold or other formatting. Do not answer the request or add anything."),
 }
+POINTS_COMMAND = (
+    r"(?:(?:points\s*[,;:.]\s*)?(?:(?:can|could|would) you\s+)?(?:make|put|turn|format|organi[sz]e|write) "
+    r"(?:this|it|that|these|the following) (?:(?:in(?:to)?|as|a) (?:a )?(?:bullet(?:ed)? (?:points|list)|bullets|points|list)"
+    r"|(?:bullet(?:ed)? )?points)|(?:in|as) bullet points|bullet (?:point )?(?:this|these|it)"
+    r"|(?:bullet points|bullets)(?=\s*[,;:.!?]|\s*$))"
+)
+NUMBERED_COMMAND = (
+    r"(?:(?:make|put|turn|format|organi[sz]e|write) (?:this|it|that|these|the following) "
+    r"(?:(?:in(?:to)?|as) )?(?:a )?numbered (?:list|points|steps)|number (?:this|these|the points|the steps)"
+    r"|numbered (?:list|points)(?=\s*[,;:.!?]|\s*$))"
+)
+REQUEST_PREFIX = r"(?:(?:please|(?:can|could|would|will) you)\s+){0,2}"
 COMMANDS = [
     ("summary_bullets", r"(?:understand(?: this)? and )?summari[sz]e (?:this|it|that)(?: and)? (?:make|put|turn) (?:this|it|that) (?:in(?:to)?|as) (?:bullet )?points"),
     ("summary", r"(?:understand(?: this)? and )?summari[sz]e (?:this|it|that|the following)"),
-    ("numbered", r"(?:(?:make|put|turn|format|organi[sz]e|write) (?:this|it|that|these|the following) (?:in(?:to)?|as|a) (?:a )?numbered (?:list|points|steps)|number (?:this|these|the points|the steps))"),
-    ("bullets", r"(?:(?:make|put|turn|format|organi[sz]e|write) (?:this|it|that|these|the following) (?:in(?:to)?|as|a) (?:a )?(?:bullet(?:ed)? (?:points|list)|bullets|points|list)|(?:in|as) bullet points|bullet (?:point )?(?:this|these|it))"),
+    ("numbered", NUMBERED_COMMAND),
+    ("bullets", POINTS_COMMAND),
     ("concise", r"(?:make (?:this|it|that) (?:shorter|more concise|concise|briefer)|(?:shorten|tighten) (?:this|it|that)(?: up)?)"),
     ("formal", r"make (?:this|it|that) (?:more )?(?:formal|professional)"),
     ("casual", r"make (?:this|it|that) (?:more )?(?:casual|friendly|friendlier|relaxed|warmer)"),
-    ("paragraphs", r"(?:make|put|turn|format|organize) (?:this|it|that|the following) (?:in(?:to)?|as) (?:proper |clear )?paragraphs"),
-    ("email", r"(?:write|make|put|turn|format) (?:this|it|that|the following) (?:in(?:to)?|as) (?:an? )?email"),
+    ("paragraphs", r"(?:make|put|turn|format|organi[sz]e|split|break) (?:this|it|that|the following)(?: up)? (?:in(?:to)?|as) (?:proper |clear )?paragraphs"),
+    ("email", r"(?:write|make|put|turn|format|convert) (?:this|it|that|the following) (?:(?:in(?:to)?|as) )?(?:an? )?email"),
 ]
 
 
@@ -75,9 +100,10 @@ def writing_intent(text, enabled=True):
     for _ in range(2):
         found = False
         for kind, pattern in COMMANDS:
-            prefix = re.match(r"^(?:(?:ok(?:ay)?|so|alright|all right|right|well|um+|uh+)[,.!]?\s+)*(?:please\s+)?" + pattern + r"\b[\s:,.!;-]*", content, re.I)
+            prefix = re.match(r"^(?:(?:ok(?:ay)?|so|alright|all right|right|well|um+|uh+)[,.!]?\s+)*" + REQUEST_PREFIX
+                              + pattern + r"\b[\s:,.!?;-]*", content, re.I)
             # Whisper often joins a trailing instruction with a comma instead of a full stop.
-            suffix = re.search(r"[.!;,]\s*(?:please\s+)?" + pattern + r"\s*[.!]*$", content, re.I)
+            suffix = re.search(r"[.!?;,:\n]\s*" + REQUEST_PREFIX + pattern + r"\s*[.!?]*$", content, re.I)
             match = prefix or suffix
             if match:
                 content = (content[match.end():] if prefix else content[:match.start()]).strip()
@@ -312,8 +338,10 @@ def apply_vocabulary(text, entries):
 
 # Only when spoken on its own: "Please delete that file" stays dictated text.
 SCRATCH = re.compile(
-    r"(?:^|(?<=[.,;!?]))\s*(?:(?:no|oh|oops|uh|um)[,.]?\s+)?(?:scratch|strike|delete|erase) (?:that|this|the last (?:sentence|bit|part|line))\s*(?:[.,;!?]+|$)",
+    r"(?:^|(?<=[.,;!?\n]))[ \t]*(?:(?:no|oh|oops|uh|um)[,.]?[ \t]+)?(?:scratch|strike|delete|erase) "
+    r"(?P<scope>that|this|the last (?:sentence|bit|part|line))[ \t]*(?:[.,;!?]+|(?=\n|$))",
     re.I)
+SPOKEN_PUNCTUATION = {"question mark": "?", "exclamation point": "!", "exclamation mark": "!", "full stop": "."}
 ABBREVIATIONS = {"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e"}
 
 
@@ -333,32 +361,41 @@ def _last_sentence_boundary(before):
     return -1
 
 
+def without_last_fragment(text, scope):
+    before = text.rstrip(" \t\n,;.!?")
+    boundary = before.rfind("\n") if scope.casefold() == "the last line" else _last_sentence_boundary(before)
+    return before[:boundary + 1]
+
+
 def apply_voice_commands(text):
-    """Spoken editing: "scratch that" removes what was said since the last full stop;
-    "new line" and "new paragraph" break the text. Commands must stand alone between pauses."""
-    while True:
-        match = SCRATCH.search(text)
-        if not match:
-            break
-        # The sentence just spoken ends at the command; drop back to the one before it.
-        before = text[:match.start()].rstrip(" ,;.!?")
-        boundary = _last_sentence_boundary(before)
-        before = before[:boundary + 1] if boundary >= 0 else ""
-        text = (before + " " + text[match.end():].lstrip(" ,.")).strip()
+    """Apply standalone editing cues between pauses."""
+    text = re.sub(r"[.!?,;:][ \t]+(" + "|".join(SPOKEN_PUNCTUATION) + r")[ \t]*(?:[.!?]+|(?=\n|$))",
+                  lambda match: SPOKEN_PUNCTUATION[match[1].casefold()], text, flags=re.I)
 
-    def _break(suffix):
-        def replace(match):
-            punct = match.group(1) or ""
-            if not punct:
-                return suffix
-            return (punct if punct in "!?" else ".") + suffix
-        return replace
+    def break_text(kind):
+        return "\n\n" if kind.casefold() == "paragraph" else "\n"
 
-    text = re.sub(r"(^|[.,;!?])\s*(?:new|next) paragraph\s*(?:[.,;!?]+\s*|$)", _break("\n\n"), text, flags=re.I)
-    text = re.sub(r"(^|[.,;!?])\s*(?:new|next) line\s*(?:[.,;!?]+\s*|$)", _break("\n"), text, flags=re.I)
+    def line_break(match):
+        punctuation, kind = match.groups()
+        ending = (punctuation if punctuation in "!?" else ".") if punctuation else ""
+        return ending + break_text(kind)
+
+    paired_breaks = re.fullmatch(r"new (paragraph|line)[,.:;!?]*\s+(.+?)\s+new (paragraph|line)[.?!]*", text, re.I)
+    if paired_breaks and not re.search(r"\b(?:a|the|another|this|that)$", paired_breaks[2], re.I):
+        text = break_text(paired_breaks[1]) + paired_breaks[2] + break_text(paired_breaks[3])
+    text = re.sub(r"(^|[.,;!?]|(?<=\n))[ \t]*(?:new|next) (paragraph|line)[ \t]*(?:[.,;!?]+[ \t]*|(?=\n|$))",
+                  line_break, text, flags=re.I)
+    while match := SCRATCH.search(text):
+        before = without_last_fragment(text[:match.start()], match["scope"])
+        after = text[match.end():].lstrip(" ,.")
+        if not after:
+            text = before.rstrip("\n")
+        else:
+            separator = " " if before and not before.endswith("\n") and not after.startswith("\n") else ""
+            text = before + separator + after
     text = re.sub(r"^\.\n+", "", text)
     text = re.sub(r"\.\.\n", ".\n", text)
-    return re.sub(r"[ \t]+\n", "\n", text).strip()
+    return re.sub(r"[ \t]+\n", "\n", text).strip(" \t")
 
 
 def looks_like_instruction(text):
@@ -369,8 +406,10 @@ def looks_like_instruction(text):
 def fit_to_context(text, before, vocabulary=()):
     """Join a dictation onto the text before the cursor: add a space, and continue a sentence
     in lowercase unless the first word is a name."""
-    if not text or not before or text.startswith(("-", "•", "\n")):
+    if not text or not before or text.startswith("\n"):
         return text
+    if re.match(r"(?:[-*•]|\d+[.)])\s", text):
+        return text if re.search(r"\n[ \t]*$", before) else "\n" + text
     tail = before.rstrip(" \t")
     if tail and tail[-1] not in ".!?:\n\"“”'(" and tail[-1] != "\u2014":
         first = re.match(r"([A-Z][a-z]+)\b", text)
@@ -421,6 +460,12 @@ def collapse_repeats(text):
         index += 1
     text = " ".join(kept)
     return re.sub(r"\b((?:[\w']+[\s,]+){0,7}[\w']+)(?:[\s,.;]+\1\b){2,}", r"\1", text, flags=re.I)
+
+
+def normalize_dictation(text, deduplicate=False):
+    """Keep spoken line and paragraph breaks while tidying the text between them."""
+    lines = apply_voice_commands(text).split("\n")
+    return "\n".join(resolve_restatements(collapse_repeats(line) if deduplicate else line) for line in lines)
 
 
 def join_parts(parts):
@@ -474,6 +519,94 @@ def trim_silence(audio):
 # Words a speaker uses to enumerate a list: "number one", "3.", "second", "finally".
 LIST_LABEL = (r"(?:(?:number|point|item|step)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)|\d+[.)]|"
               r"first(?:ly)?|second(?:ly)?|third(?:ly)?|fourth|fifth|sixth|next|then|finally|and finally|lastly)")
+CARDINALS = "one two three four five six seven eight nine ten".split()
+ORDINALS = "first second third fourth fifth sixth seventh eighth ninth tenth".split()
+LIST_NUMBERS = {label: number for labels in (CARDINALS, ORDINALS) for number, label in enumerate(labels, 1)}
+LIST_NUMBERS.update({label + "ly": number for number, label in enumerate(ORDINALS[:3], 1)})
+SPOKEN_LIST_MARKER = re.compile(
+    r"(?:^\s*|(?<=[.!?,;:])\s+|(?<=\n)[ \t]*)(?P<cue>(?:number|point|item|step)\s+)?"
+    r"(?P<label>[1-9][0-9]?|" + "|".join(LIST_NUMBERS) + r")\b"
+    r"(?:\s*(?P<separator>[.,:;)])(?=\s|$)|(?=\s|$))\s*",
+    re.I,
+)
+LIST_COMMAND = rf"(?:(?P<numbered>{NUMBERED_COMMAND})|(?P<bullets>{POINTS_COMMAND}))"
+INLINE_LIST_COMMAND = re.compile(r"(?<=[.!?,;:\n])\s*" + REQUEST_PREFIX + LIST_COMMAND + r"\b[\s:,.!?;-]*", re.I)
+HEY_LIST_COMMAND = re.compile(r"^" + HEY + LIST_COMMAND + r"\b[\s:,.!?;-]*", re.I)
+POINTS_CUE = re.compile(r"^(?:in\s+)?(?:bullet\s+)?points\s*[,:;.]\s*", re.I)
+LIST_ACTION = re.compile(
+    r"^(?:add|ask|bring|buy|call|change|check|choose|close|confirm|copy|create|delete|email|finish|fix|"
+    r"get|install|keep|leave|make|move|open|paste|pay|read|remove|reply|restart|review|save|send|"
+    r"set|share|start|stop|test|turn|update|use|verify|write)\b",
+    re.I,
+)
+
+
+def spoken_list_items(text, explicit=False):
+    """Read a sequence starting at one, allowing Whisper's spoken or digit labels."""
+    items, parts, start = [], [], None
+    for marker in SPOKEN_LIST_MARKER.finditer(text):
+        label = marker["label"].lower()
+        number = int(label) if label.isascii() and label.isdigit() else LIST_NUMBERS[label]
+        if not marker["separator"] and (not explicit or (not marker["cue"] and (label in CARDINALS or label.isdigit()))):
+            continue  # Bare quantities and phrases like "first impressions" can be ordinary prose.
+        if start is None:
+            if marker.start() != 0 or number != 1:
+                return []
+        elif number not in {len(items) + 1, len(items) + 2}:
+            continue
+        else:
+            parts.append(text[start:marker.start()].strip(" \t\n,;:"))
+            if number == len(items) + 2:
+                items.append(parts)
+                parts = []
+        start = marker.end()
+    if not items:
+        return []
+    items.append([*parts, text[start:].strip(" \t\n,;:")])
+    # Whisper sometimes repeats a whole labeled item, including its number.
+    result = []
+    for parts in items:
+        item = " ".join(filter(None, dict.fromkeys(parts)))
+        if not re.search(r"\w", item):
+            return []
+        result.append(item[0].upper() + item[1:])
+    return result
+
+
+def render_list(items, intent):
+    return "\n".join(f"- {item}" if intent == "bullets" else f"{number}. {item}"
+                     for number, item in enumerate(items, 1))
+
+
+def format_spoken_list(text, intent=None, fallback=False):
+    if intent is None:
+        command = HEY_LIST_COMMAND.match(text)
+        intent, content = (command.lastgroup, text[command.end():]) if command else writing_intent(text)
+        if intent == "cleanup" and (cue := POINTS_CUE.match(content)):
+            intent, content = "bullets", content[cue.end():]
+    else:
+        content = text
+    if intent not in {"cleanup", "bullets", "numbered"}:
+        return None
+
+    intro = ""
+    body, boundary, tail = content.partition("\n\n")
+    items = spoken_list_items(body, explicit=intent != "cleanup")
+    if not items and intent == "cleanup":
+        for command in INLINE_LIST_COMMAND.finditer(content):
+            body, boundary, tail = content[command.end():].partition("\n\n")
+            items = spoken_list_items(body, explicit=True)
+            if items:
+                intro = content[:command.start()].strip(" ,;:")
+                intent = command.lastgroup
+                break
+    if not items and intent in {"bullets", "numbered"}:
+        separated = list_items(body)
+        if len(separated) > 1 or fallback:
+            items = separated
+    if not items:
+        return None
+    return (intro + "\n\n" if intro else "") + render_list(items, intent) + boundary + tail
 
 
 def without_list_labels(text):
@@ -483,10 +616,26 @@ def without_list_labels(text):
 
 def list_items(content):
     """One item per sentence, in the speaker's words, without spoken enumerators."""
+    enumerated = spoken_list_items(content, explicit=True)
+    if enumerated:
+        return enumerated
+    content = without_list_labels(content)
+    parts, start = [], 0
+    for boundary in re.finditer(r"(?<=[.!?])(?=[ \t])|[;\n]+", content):
+        at = boundary.start()
+        if at == boundary.end() and _last_sentence_boundary(content[:at]) != at - 1:
+            continue
+        parts.append(content[start:at])
+        start = boundary.end()
+    parts.append(content[start:])
     items = []
-    for part in re.split(r"(?<=[.!?])\s+|\n+", without_list_labels(content)):
-        part = re.sub(r"^" + LIST_LABEL + r"[\s,:.)-]+", "", part.strip(" ,;"), flags=re.I).strip(" ,;")
-        if re.search(r"\w{2}", part):
+    for part in parts:
+        part = re.sub(r"^" + LIST_LABEL + r"[\s,:.)-]+", "", part.strip(" \t\n,;"), flags=re.I).strip(" \t\n,;")
+        actions = re.split(r",\s+(?:and\s+)?", part, flags=re.I)
+        # A pause can turn several spoken imperatives into one comma-separated sentence.
+        if len(actions) > 1 and all(LIST_ACTION.match(action) for action in actions):
+            items.extend(action[0].upper() + action[1:] for action in actions)
+        elif re.search(r"\w{2}", part):
             items.append(part[0].upper() + part[1:])
     return items
 
@@ -498,6 +647,7 @@ NUMBER_WORDS = {
     "seventeen": "17", "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30",
     "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
 }
+NEGATIONS = re.compile(r"\b(?:not|never|cannot|neither|nor)\b|\bno\b(?!\.\s*\d)|n['’]t\b", re.I)
 
 
 def coverage(raw, edited):
@@ -525,8 +675,9 @@ def valid_edit(raw, edited, intent="cleanup"):
     # Reject LLM meta-preambles/refusals, without falsely rejecting dictations that genuinely start with "Here's..." or "I can't...".
     if re.search(r"(?i)^(here(?:'s| is)\s+(?:the\s+)?(?:corrected|edited|cleaned|rewritten|formatted|updated|revised|summarized)|corrected (?:text|version)\s*:)", edited):
         return False
-    if re.search(r"(?i)^(here(?:'s| is)\b|corrected (?:text|version)\b|i cannot\b|i can't\b)", edited):
-        if not re.search(r"(?i)^(here(?:'s| is)\b|corrected (?:text|version)\b|i cannot\b|i can't\b)", raw_stripped):
+    preamble = r"(?i)^(here(?:['’]s| is)\b|corrected (?:text|version)\b|i cannot\b|i can['’]t\b)"
+    if re.search(preamble, edited):
+        if not re.search(preamble, raw_stripped):
             return False
     # Tidying and list-making must not quietly drop sentences or items.
     needed = {"cleanup": 0.7, "bullets": 0.7, "numbered": 0.7, "paragraphs": 0.7, "email": 0.55, "prompt": 0.45}.get(intent)
@@ -537,6 +688,11 @@ def valid_edit(raw, edited, intent="cleanup"):
         edited = re.sub(r"(?m)^\s*(?:[-*•]\s*)?\d+[.)]\s+", "", edited)
         raw = without_list_labels(raw)
     raw = re.sub(r"\b\d+(?:[.,]\d+)*\s*[,;-]?\s*(?:no|sorry|actually|i mean)[, ]+(?:at\s+)?(?=\d)", "", raw, flags=re.I)
+    if intent == "cleanup" and len(NEGATIONS.findall(raw)) != len(NEGATIONS.findall(edited)):
+        return False
+    if intent == "cleanup" and "\n" in raw.strip():
+        if re.findall(r"\n+", raw.strip()) != re.findall(r"\n+", edited):
+            return False
     norm_raw = re.sub(r"(?<=\d),(?=\d{3}\b)", "", raw)
     norm_edited = re.sub(r"(?<=\d),(?=\d{3}\b)", "", edited)
     raw_nums = set(re.findall(r"\d+(?:\.\d+)?", norm_raw))
@@ -607,6 +763,20 @@ def fetch_models(repos, report, status):
         report(label, finished, total)
 
 
+def whisper_encoder_attention(heads, query, key, value, mask=None):
+    """Run Whisper's encoder attention without materializing its full score matrix."""
+    import mlx.core as mx
+
+    batch, length, width = query.shape
+    depth = width // heads
+    query, key, value = (
+        tensor.reshape(batch, -1, heads, depth).transpose(0, 2, 1, 3)
+        for tensor in (query, key, value)
+    )
+    attended = mx.fast.scaled_dot_product_attention(query, key, value, scale=depth ** -0.5, mask=mask)
+    return attended.transpose(0, 2, 1, 3).reshape(batch, length, width), None
+
+
 class Engine:
     def __init__(self, backend="whisper", cleanup=True, memory=True):
         self.backend = backend
@@ -653,8 +823,13 @@ class Engine:
             self.parakeet_transcribe(np.zeros(16000, dtype=np.float32))
         else:
             import mlx_whisper
+            from mlx_whisper.transcribe import ModelHolder
 
             self.stt = mlx_whisper
+            model = ModelHolder.get_model(WHISPER, mx.float16)
+            for block in model.encoder.blocks:
+                attention = block.attn
+                attention.qkv_attention = partial(whisper_encoder_attention, attention.n_head)
             self.stt.transcribe(np.zeros(16000, dtype=np.float32),
                                 path_or_hf_repo=WHISPER, language="en", temperature=0.0,
                                 condition_on_previous_text=False, verbose=None)
@@ -685,12 +860,18 @@ class Engine:
             context += (" Text just before the cursor where this will be inserted (JSON data, for continuity of names, "
                         "spelling and tone; never repeat or edit it; if it ends mid-sentence, continue that sentence "
                         "without a capital letter unless the first word is a name): " + json.dumps(self.context[-300:], ensure_ascii=False))
-        instruction = INTENT_INSTRUCTIONS.get(intent, "Preserve all content; do not summarize or create lists unless the content clearly has a list structure.")
-        messages = [{"role": "system", "content": SYSTEM_PROMPT + " " + instruction + context}]
+        instructions = CLEANUP_PROMPT if intent == "cleanup" else SYSTEM_PROMPT
+        if intent != "cleanup":
+            instructions += " " + INTENT_INSTRUCTIONS.get(
+                intent, "Preserve all content; do not summarize or create lists unless the content clearly has a list structure."
+            )
+        messages = [{"role": "system", "content": instructions + context}]
         if intent == "cleanup":
             messages.extend([
                 {"role": "user", "content": "I I need to meet Maya on Monday, no, Tuesday. Um, keep it quick."},
                 {"role": "assistant", "content": "I need to meet Maya on Tuesday. Keep it quick."},
+                {"role": "user", "content": "The package arrived this morning."},
+                {"role": "assistant", "content": "<unchanged>"},
             ])
         elif intent == "prompt":
             messages.extend([
@@ -717,16 +898,83 @@ class Engine:
             return self.parakeet_transcribe(audio).strip()
         glossary = ", ".join(e["word"] for e in self.vocabulary[:40] if e.get("word"))
         hint = " ".join(part for part in [glossary + "." if glossary else "", previous[-200:].strip()] if part)
+        prompt = hint[-500:] or None
+        language = None if language == "auto" else language
+        if language is None:
+            # Auto detection and decoding can share an encoder pass for a complete short clip.
+            text, language = self.whisper_single_window(audio, prompt)
+            if text is not None:
+                self.detected_language = language
+                return collapse_repeats(text)
         result = self.stt.transcribe(
-            audio, path_or_hf_repo=WHISPER, language=None if language == "auto" else language,
+            audio, path_or_hf_repo=WHISPER, language=language,
             # Greedy first; Whisper re-decodes only a stretch that comes out repetitive or unsure.
             temperature=(0.0, 0.2, 0.4, 0.6), compression_ratio_threshold=2.4, logprob_threshold=-1.0,
             no_speech_threshold=0.6, condition_on_previous_text=False, verbose=None,
-            word_timestamps=False, initial_prompt=hint[-500:] or None,
+            word_timestamps=False, initial_prompt=prompt,
         )
         self.detected_language = result.get("language")
         segments = [s["text"].strip() for s in result.get("segments", []) if keep_segment(s)]
         return collapse_repeats(" ".join(segments).strip())
+
+    def whisper_single_window(self, audio, prompt):
+        import mlx.core as mx
+        from mlx_whisper.audio import HOP_LENGTH, N_FRAMES, N_SAMPLES, SAMPLE_RATE, log_mel_spectrogram
+        from mlx_whisper.decoding import DecodingOptions
+        from mlx_whisper.tokenizer import get_tokenizer
+        from mlx_whisper.transcribe import ModelHolder
+
+        if not HOP_LENGTH <= len(audio) <= 10 * SAMPLE_RATE:
+            return None, None
+        model = ModelHolder.get_model(WHISPER, mx.float16)
+        mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)[:N_FRAMES].astype(mx.float16)
+        samples_per_token = HOP_LENGTH * (N_FRAMES // model.dims.n_audio_ctx)
+        # Keep eight seconds of trailing silence and bucket the shapes in two-second steps.
+        # The view shares the warmed weights. Only its encoder's positional table is shorter.
+        window_seconds = 2 * math.ceil((len(audio) / SAMPLE_RATE + 8) / 2)
+        candidates = [model]
+        if self.detected_language is None or self.detected_language in SHORT_WHISPER_LANGUAGES:
+            window = copy(model)
+            context = window_seconds * SAMPLE_RATE // samples_per_token
+            window.dims = replace(model.dims, n_audio_ctx=context)
+            window.encoder = copy(model.encoder)
+            window.encoder._positional_embedding = model.encoder._positional_embedding[:context]
+            candidates.insert(0, window)
+
+        for candidate in candidates:
+            reduced = candidate is not model
+            frames = candidate.dims.n_audio_ctx * samples_per_token // HOP_LENGTH
+            features = candidate.encoder(mel[None, :frames])[0]
+            _, probabilities = candidate.detect_language(features)
+            language = max(probabilities, key=probabilities.get)
+            if reduced and (language not in SHORT_WHISPER_LANGUAGES or probabilities[language] < 0.98):
+                continue
+            # MLX Whisper derives this option from the window size. Keep the same token limit
+            # and 20 ms timestamp spacing even when the shorter encoder is in use.
+            options = DecodingOptions(language=language, prompt=prompt, max_initial_timestamp=N_FRAMES / frames)
+            result = candidate.decode(features, options)
+            if (not math.isfinite(result.avg_logprob) or result.avg_logprob <= (-0.65 if reduced else -1.0)
+                    or result.no_speech_prob > 0.6 or result.compression_ratio > 2.4):
+                continue
+            tokenizer = get_tokenizer(model.is_multilingual, num_languages=model.num_languages, language=language)
+            timestamps = [index for index, token in enumerate(result.tokens) if token >= tokenizer.timestamp_begin]
+            if (not timestamps or len(timestamps) % 2
+                    or timestamps[0] != 0 or timestamps[-1] != len(result.tokens) - 1
+                    or any(end + 1 != start for end, start in zip(timestamps[1::2], timestamps[2::2]))):
+                continue
+            last_timestamp = result.tokens[-1] - tokenizer.timestamp_begin
+            if abs(len(audio) - last_timestamp * samples_per_token) > SAMPLE_RATE:
+                continue
+            segments = []
+            for start, end in zip(timestamps[::2], timestamps[1::2]):
+                text = tokenizer.decode(result.tokens[start + 1:end]).strip()
+                segment = {"text": text, "no_speech_prob": result.no_speech_prob, "avg_logprob": result.avg_logprob}
+                if keep_segment(segment):
+                    segments.append(text)
+            if segments:
+                return " ".join(segments), language
+        # May need a different temperature or another seek. Keep the full-window language.
+        return None, language
 
     def parakeet_transcribe(self, audio):
         import mlx.core as mx
@@ -739,6 +987,10 @@ class Engine:
     def clean(self, text, budget=2.5, smart=None, intent=None):
         """Tidy a dictation, following a spoken writing command at its start or end. A given
         `intent` (from a "hey" instruction) is applied to the whole text instead."""
+        if intent in {"bullets", "numbered"}:
+            formatted = format_spoken_list(text, intent)
+            if formatted:
+                return formatted, None
         if self.llm is None:
             return text, self.cleanup_error or "Grammar cleanup is off."
         from mlx_lm import stream_generate
@@ -753,6 +1005,8 @@ class Engine:
         content = clear_self_corrections(content)
         if not content:
             return text, "Say the content together with your writing instruction."
+        list_fallback = (format_spoken_list(content, intent, fallback=True)
+                         if intent in {"bullets", "numbered"} else None)
         if intent != "cleanup":
             budget = max(budget, 4.0)
         start = time.perf_counter()
@@ -767,12 +1021,14 @@ class Engine:
                 last = response
                 parts.append(response.text)
                 if time.perf_counter() - start > budget:
-                    return text, "Used original transcript to keep dictation fast."
+                    return (list_fallback, None) if list_fallback else (text, "Used original transcript to keep dictation fast.")
         finally:
             stream.close()
         if last is not None and last.finish_reason == "length":
-            return text, "Used original transcript because the edit was incomplete."
+            return (list_fallback, None) if list_fallback else (text, "Used original transcript because the edit was incomplete.")
         edited = "".join(parts).strip()
+        if intent == "cleanup" and edited == "<unchanged>":
+            edited = content
         edited = preserve_space_shortcut(content, edited)
         if intent in {"bullets", "summary_bullets"} and not re.search(r"(?m)^\s*[-*•]\s+", edited):
             # Preserve the model's wording, supplying only explicitly requested list structure.
@@ -781,11 +1037,11 @@ class Engine:
             else:
                 sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])|\n+", edited)
                 edited = "\n".join("- " + sentence.strip() for sentence in sentences if sentence.strip())
+        elif intent == "numbered" and not re.match(r"1[.)]\s", edited):
+            edited = render_list(list_items(edited), intent)
         if not valid_edit(content, edited, intent):
-            if intent in {"bullets", "numbered"}:
-                # Still honour the request: one item per sentence, in the speaker's words.
-                marker = (lambda n: f"{n}. ") if intent == "numbered" else (lambda n: "- ")
-                return "\n".join(marker(n) + item for n, item in enumerate(list_items(content), 1)), None
+            if list_fallback:
+                return list_fallback, None
             return text, "Used original transcript because the edit changed too much."
         return edited, None
 
@@ -831,8 +1087,7 @@ class Engine:
                 # No model: still never type the instruction, and still make a requested list.
                 text, warning = content, None
                 if intent in {"bullets", "numbered"}:
-                    marker = (lambda n: f"{n}. ") if intent == "numbered" else (lambda n: "- ")
-                    text = "\n".join(marker(n) + item for n, item in enumerate(list_items(content), 1)) or content
+                    text = render_list(list_items(content), intent) or content
                 elif instructions:
                     warning = self.cleanup_error or "Instructions other than lists need grammar cleanup turned on."
             elif intent in {"custom", "concise"}:
@@ -874,12 +1129,12 @@ class Engine:
             text = stripped
         return text, warning
 
-    def index_memory(self, text, language, save_note=False, note_id=None, use_llm=True):
+    def index_memory(self, text, language, save_note=False, note_id=None, input_pending=None):
         if self.memory is None or not text:
             return None
         from memory import fallback_entities
         entities = fallback_entities(text)
-        if use_llm and self.llm is not None:
+        if self.llm is not None and (input_pending is None or not input_pending()):
             # Run after delivering/pasting the transcript, off the user-visible path.
             from mlx_lm import stream_generate
             from mlx_lm.sample_utils import make_sampler
@@ -895,7 +1150,7 @@ class Engine:
             try:
                 for response in stream:
                     parts.append(response.text)
-                    if time.perf_counter() - start > 1.5:
+                    if (input_pending is not None and input_pending()) or time.perf_counter() - start > 1.5:
                         break
                 candidate = json.loads("".join(parts).strip())
                 if isinstance(candidate, list):
@@ -994,7 +1249,7 @@ def serve(engine, source, output):
                     # piece stays open, so a following "scratch that" can still remove it.
                     pending = session["raw"][session["consumed"]:-1]
                     if request.get("cleanup", True) and sum(len(part.split()) for part in pending) >= GROUP_WORDS:
-                        group = resolve_restatements(apply_voice_commands(" ".join(pending)))
+                        group = normalize_dictation(" ".join(pending))
                         cleaned = group
                         if session["groups"]:
                             engine.context = ""  # Only the first stretch continues the document's text.
@@ -1013,7 +1268,7 @@ def serve(engine, source, output):
             piece = engine.transcribe(audio, request.get("language", "en"), previous) if len(audio) else ""
             piece = apply_vocabulary(piece, engine.vocabulary)
             pieces = [*(session["raw"] if session else []), piece]
-            raw = resolve_restatements(collapse_repeats(apply_voice_commands(" ".join(part for part in pieces if part))))
+            raw = normalize_dictation(" ".join(part for part in pieces if part), deduplicate=True)
             stt_ms = round((time.perf_counter() - start) * 1000)
             emit(output, "transcribed", id=request_id, raw=raw, stt_ms=stt_ms)
             selection = str(request.get("selection", ""))
@@ -1025,7 +1280,13 @@ def serve(engine, source, output):
                      language=getattr(engine, "detected_language", None))
                 continue
             smart = getattr(engine, "smart_formatting", True)
-            followup = followup_instruction(raw) if raw and smart else None
+            cleanup = request.get("cleanup", True)
+            segments = split_directives(raw) if raw and smart else []
+            directive_count = sum(len(instructions) for _, instructions in segments)
+            spoken_list = None
+            if raw and smart and (not directive_count or (directive_count == 1 and HEY_LIST_COMMAND.match(raw))):
+                spoken_list = format_spoken_list(raw, fallback=not cleanup)
+            followup = followup_instruction(raw) if raw and smart and not spoken_list else None
             if followup:
                 # "Hey, make that shorter": the instruction is for the dictation just pasted.
                 earlier = str(request.get("previous_output", ""))
@@ -1036,38 +1297,41 @@ def serve(engine, source, output):
                      total_ms=round((time.perf_counter() - start) * 1000), warning=warning,
                      language=getattr(engine, "detected_language", None))
                 continue
-            segments = split_directives(raw) if raw and smart else []
-            directed = any(instructions for _, instructions in segments)
-            if raw and memory and memory_mode != "off":
+            if raw.strip() and memory and memory_mode != "off":
                 engine.vocabulary = personal_words + memory.vocabulary(limit=60, query=raw)
             text, warning, followed = raw, None, 0
             before = engine.context
-            if directed:
+            if spoken_list:
+                text = spoken_list
+            elif directive_count:
                 try:
-                    text, warning, followed = engine.follow(segments, request.get("cleanup", True))
+                    text, warning, followed = engine.follow(segments, cleanup)
                 except Exception as exc:
                     text = join_parts(content for content, _ in segments)
                     warning = f"Could not follow your instruction: {exc}"
-            elif raw and request.get("cleanup", True):
+            elif raw.strip() and cleanup:
                 try:
                     if session and session["groups"]:
                         tail_raw = " ".join(part for part in pieces[session["consumed"]:] if part)
                         leading_scratch = SCRATCH.match(tail_raw.lstrip())
                         if leading_scratch and session["groups"]:
-                            prev_group = session["groups"][-1].rstrip(" ,;.!?")
-                            boundary = _last_sentence_boundary(prev_group)
-                            session["groups"][-1] = prev_group[:boundary + 1].strip() if boundary >= 0 else ""
+                            session["groups"][-1] = without_last_fragment(session["groups"][-1], leading_scratch["scope"]).strip()
                             tail_raw = tail_raw.lstrip()[leading_scratch.end():].lstrip(" ,.")
-                        rest = resolve_restatements(apply_voice_commands(tail_raw))
+                        rest = normalize_dictation(tail_raw)
                         engine.context = ""
                         text, warning = engine.clean_long(raw, [g for g in session["groups"] if g], rest)
                     else:
                         text, warning = engine.clean(raw)
                 except Exception as exc:
                     warning = f"Used original transcript; cleanup failed: {exc}"
+            if text.strip():
+                if raw.startswith("\n"):
+                    text = raw[:len(raw) - len(raw.lstrip("\n"))] + text.lstrip("\n")
+                if raw.endswith("\n"):
+                    text = text.rstrip("\n") + raw[len(raw.rstrip("\n")):]
             text = fit_to_context(apply_vocabulary(text, personal_words), before, personal_words)
             note_id = None
-            if text and memory and memory_mode == "notes":
+            if text.strip() and memory and memory_mode == "notes":
                 try:
                     # Durably save the full note before delivering it; graph enrichment follows.
                     note_id = memory.remember(text.strip(), [], getattr(engine, "detected_language", None), save_note=True)
@@ -1078,11 +1342,11 @@ def serve(engine, source, output):
             emit(output, "result", id=request_id, text=text, raw=raw, instructions=followed,
                  stt_ms=stt_ms, total_ms=round((time.perf_counter() - start) * 1000),
                  warning=warning, language=getattr(engine, "detected_language", None))
-            if raw and memory and memory_mode != "off":
+            if raw.strip() and text.strip() and memory and memory_mode != "off":
                 try:
                     stats = engine.index_memory(text, getattr(engine, "detected_language", None),
                                                 save_note=memory_mode == "notes", note_id=note_id,
-                                                use_llm=not _has_pending_input(source))
+                                                input_pending=lambda: _has_pending_input(source))
                     emit(output, "memory", **(stats or {}))
                 except Exception as exc:
                     emit(output, "memory_warning", message=f"Could not update local memory: {exc}")

@@ -1,6 +1,8 @@
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
 const { buildSync } = require('esbuild')
+const { EventEmitter } = require('node:events')
+const { PassThrough } = require('node:stream')
 const vm = require('node:vm')
 const path = require('node:path')
 
@@ -10,12 +12,12 @@ const code = buildSync({
   alias: { '@shared': path.join(__dirname, '../src/shared') }
 }).outputFiles[0].text
 
-function fixture(t) {
+function fixture(t, spawnWorker) {
   const timers = new Map()
   const files = new Map(), sounds = []
   let now = 10_000, nextTimer = 0, pasteCount = 0, clipboardText = ''
   const electron = {
-    app: { getVersion: () => 'test', getLoginItemSettings: () => ({}), isPackaged: false },
+    app: { getVersion: () => 'test', getLoginItemSettings: () => ({}), getAppPath: () => path.join(__dirname, '..'), isPackaged: false },
     clipboard: { writeText(text) { clipboardText = text }, readText: () => clipboardText }, shell: { beep() {} },
     systemPreferences: { getMediaAccessStatus: () => 'granted', isTrustedAccessibilityClient: () => true },
     globalShortcut: { register: () => true, isRegistered: () => false, unregister() {} }
@@ -24,15 +26,21 @@ function fixture(t) {
   vm.runInNewContext(code, {
     module, exports: module.exports, process, Buffer, console,
     Date: class extends Date { static now() { return now } },
-    setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id },
+    setTimeout: (fn, delay) => { const timer = { unref() {} }; timers.set(timer, { fn, at: now + delay }); return timer },
     clearTimeout: (id) => timers.delete(id),
     setInterval: (fn, interval) => { const id = ++nextTimer; timers.set(id, { fn, at: now + interval, interval }); return id },
     clearInterval: (id) => timers.delete(id),
     require: (name) => {
       if (name === 'electron') return electron
-      if (name === 'node:fs') return { readFileSync: (file) => files.get(file) ?? '{}', writeFileSync: (file, value) => files.set(file, String(value)), mkdirSync() {}, existsSync: () => false,
+      if (name === 'node:fs') return { readFileSync: (file) => files.get(file) ?? '{}', writeFileSync: (file, value) => files.set(file, String(value)), mkdirSync() {},
+        constants: { X_OK: 1 }, accessSync() {}, existsSync: (file) => Boolean(spawnWorker && file.endsWith('/worker.py')),
+        openSync: () => 1, closeSync() {},
         renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) } }
-      if (name === 'node:child_process') return { spawn: (...args) => { sounds.push(args); return { on() {}, unref() {} } } }
+      if (name === 'node:child_process') return { spawn: (...args) => {
+        if (spawnWorker && args[0].endsWith('/bin/python')) return spawnWorker(...args)
+        sounds.push(args)
+        return { on() {}, unref() {} }
+      } }
       return require(name)
     }
   })
@@ -61,6 +69,39 @@ function fixture(t) {
   t.after(() => { timers.clear() })
   return { model, flush, advance, files, sounds, electron, starts: () => starts, stops: () => stops, pasteCount: () => pasteCount }
 }
+
+test('initial warm-up starts the worker and rapid retries launch only the latest configuration', async (t) => {
+  const children = []
+  const f = fixture(t, (_python, args) => {
+    const child = Object.assign(new EventEmitter(), {
+      args, stdin: new PassThrough(), stdout: new PassThrough(), exitCode: null,
+      kill(signal) { this.signal = signal }
+    })
+    children.push(child)
+    return child
+  })
+  f.model.worker.onEvent = (event) => f.model.handle(event)
+  f.model.reloadModels()
+  await f.flush()
+  assert.equal(children.length, 1)
+  children[0].stdout.write('{"event":"ready","cleanup":true}\n')
+  assert.equal(f.model.state.phase, 'ready')
+
+  f.model.reloadModels()
+  f.model.stored.cleanup = false
+  f.model.reloadModels()
+  await f.flush()
+  assert.equal(children.length, 1)
+  assert.equal(children[0].signal, 'SIGTERM')
+  children[0].exitCode = 0
+  children[0].emit('exit')
+  await f.flush()
+  assert.equal(children.length, 2)
+  assert.equal(children[1].args.at(-1), '--no-cleanup')
+  assert.equal(f.model.state.phase, 'preparing')
+  children[1].stdout.write('{"event":"ready","cleanup":false}\n')
+  assert.equal(f.model.state.phase, 'ready')
+})
 
 test('an ordinary 600 ms press stays recording on release; the next tap stops', async (t) => {
   const f = fixture(t)
@@ -318,6 +359,20 @@ test('explicit paste-last works when automatic paste is disabled', async (t) => 
   await f.model.pasteLast()
   assert.equal(f.pasteCount(), 1)
   assert.match(f.model.state.message, /^Pasted\./)
+})
+
+test('history keeps full formatting and skips whitespace-only dictations', async (t) => {
+  const f = fixture(t)
+  const text = '\n1. Call Maya.\n2. Send the file.\n\n'
+  f.model.requestID = 'normal'
+  f.model.handle({ event: 'result', id: 'normal', text })
+  await f.flush()
+  assert.equal(f.model.state.history[0].text, text)
+
+  f.model.requestID = 'break'
+  f.model.handle({ event: 'result', id: 'break', text: '\n\n' })
+  await f.flush()
+  assert.deepEqual(Array.from(f.model.state.history, (entry) => entry.text), [text])
 })
 
 test('stopRecording preserves streamed pieces when recorder.stop returns null', async (t) => {

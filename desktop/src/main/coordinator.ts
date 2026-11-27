@@ -636,9 +636,8 @@ export class Coordinator extends EventEmitter {
         const detected = typeof event.language === 'string' && event.language ? event.language : this.state.detectedLanguage
         if (detected !== this.stored.detectedLanguage) this.store({ detectedLanguage: detected })
         const total = Number(event.total_ms ?? 0) / 1000, stt = Number(event.stt_ms ?? 0) / 1000
-        const history: HistoryEntry[] = [{ text: text.trim(), at: Date.now(), app: this.target?.appName ?? '' }, ...this.state.history].slice(0, 10)
         this.update({
-          transcript: text, detectedLanguage: detected, history,
+          transcript: text, detectedLanguage: detected, history: this.historyAfter(text),
           timing: `${total.toFixed(2)} s total · ${stt.toFixed(2)} s transcription`,
           notice: warning
         })
@@ -691,6 +690,11 @@ export class Coordinator extends EventEmitter {
 
   // MARK: Delivery
 
+  private historyAfter(text: string): HistoryEntry[] {
+    if (!text.trim()) return this.state.history
+    return [{ text, at: Date.now(), app: this.target?.appName ?? '' }, ...this.state.history].slice(0, 10)
+  }
+
   async copyText(text = this.state.transcript): Promise<void> {
     if (text) await clipboard.writeText(text)
   }
@@ -738,7 +742,7 @@ export class Coordinator extends EventEmitter {
       this.setPhase('ready', warning || 'Nothing recent to apply that to. Dictate the text and the instruction together.')
       return
     }
-    this.update({ transcript: text, notice: '', history: [{ text: text.trim(), at: Date.now(), app: this.target?.appName ?? '' }, ...this.state.history].slice(0, 10) })
+    this.update({ transcript: text, notice: '', history: this.historyAfter(text) })
     try {
       const outcome = this.stored.autoPaste && systemPreferences.isTrustedAccessibilityClient(false)
         ? await this.helper.replaceLast(last.text, text) : 'untrusted'

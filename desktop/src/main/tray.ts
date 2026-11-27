@@ -1,5 +1,6 @@
 import { app, Menu, nativeImage, shell, Tray, type MenuItemConstructorOptions } from 'electron'
-import type { Phase } from '@shared/types'
+import type { HistoryEntry, Phase } from '@shared/types'
+import { readRecentSavedDictations } from './archive'
 import type { Coordinator } from './coordinator'
 import type { DesktopWindow } from './desktop'
 import { openFolder, paths } from './paths'
@@ -15,6 +16,7 @@ function clip(text: string, limit: number): string {
 
 /** Menu bar control; the menu is rebuilt on every open so it always reflects live state. */
 export class StatusMenu {
+  private startedAt = Date.now()
   private tray: Tray
   private icons: Record<'idle' | 'busy' | 'alert' | 'recording', Electron.NativeImage>
 
@@ -26,8 +28,8 @@ export class StatusMenu {
     }
     this.icons = { idle: load('trayTemplate', true), busy: load('trayBusyTemplate', true), alert: load('trayAlertTemplate', true), recording: load('trayRecording', false) }
     this.tray = new Tray(this.icons.idle)
-    this.tray.on('click', () => this.open())
-    this.tray.on('right-click', () => this.open())
+    this.tray.on('click', () => void this.open())
+    this.tray.on('right-click', () => void this.open())
     this.update()
   }
 
@@ -39,12 +41,14 @@ export class StatusMenu {
     this.tray.setToolTip(`Dictait · ${titles[phase]} · Control–Space`)
   }
 
-  private open(): void {
+  private async open(): Promise<void> {
     this.model.refreshPermissions()
-    this.tray.popUpContextMenu(Menu.buildFromTemplate(this.items()))
+    const saved = this.model.state.history.length < 2 && this.model.stored.memoryMode === 'notes'
+      ? await readRecentSavedDictations(this.startedAt) : []
+    this.tray.popUpContextMenu(Menu.buildFromTemplate(this.items(saved)))
   }
 
-  private items(): MenuItemConstructorOptions[] {
+  private items(saved: HistoryEntry[]): MenuItemConstructorOptions[] {
     const model = this.model, state = model.state, settings = model.stored
     const editable = ['ready', 'failed'].includes(state.phase)
     const set = (patch: Parameters<Coordinator['setSettings']>[0]) => () => model.setSettings(patch)
@@ -53,6 +57,17 @@ export class StatusMenu {
       { label: clip(state.message, 90), enabled: false }
     ]
     if (state.notice) items.push({ label: clip(state.notice, 140), enabled: false })
+    const recent = [...state.history, ...(settings.memoryMode === 'notes' ? saved : [])]
+      .filter((entry) => entry.text.trim()).slice(0, 2)
+    if (recent.length) {
+      items.push({ type: 'separator' }, ...recent.map((entry) => ({
+        label: `Copy “${clip(entry.text.replace(/\s+/g, ' ').trim(), 60)}”`,
+        click: () => void model.copyText(entry.text).then(
+          () => model.notify('Dictation copied', 'Press ⌘V to paste.'),
+          () => model.notify('Could not copy dictation', 'Try again from the menu bar.')
+        )
+      })))
+    }
     items.push(
       { type: 'separator' },
       { label: 'Open Dictait', click: () => this.desktop.show() },

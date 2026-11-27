@@ -3,19 +3,12 @@ import { createContext, forwardRef, useCallback, useContext, useEffect, useId, u
 import { Search, X } from 'lucide-react'
 import { snappy, smooth } from '../lib/motion'
 
-/** Dictait's mark: a speech-bubble D with a text caret cut through it. */
+/** Dictait's mark: a speech-bubble D with a text caret cut through it, in the ink colour. */
 export function Mark({ size = 22 }: { size?: number }) {
-  const gradient = useId()
   return (
     <svg className="mark" width={size * 0.86} height={size} viewBox="24 21 57 66" aria-hidden>
-      <defs>
-        <linearGradient id={gradient} x1="0.15" y1="0" x2="0.85" y2="1">
-          <stop offset="0" stopColor="#FF9456" />
-          <stop offset="1" stopColor="#FF4A2E" />
-        </linearGradient>
-      </defs>
       <path
-        fill={`url(#${gradient})`}
+        fill="currentColor"
         fillRule="evenodd"
         d="M26 31 C26 26.6 29.6 23 34 23 H50 A27 27 0 0 1 50 77 H40 L29.5 85.2 C28 86.4 26 85.3 26 83.4 Z M41 35 H55 A2.5 2.5 0 0 1 55 40 H50.5 V60 H55 A2.5 2.5 0 0 1 55 65 H41 A2.5 2.5 0 0 1 41 60 H45.5 V40 H41 A2.5 2.5 0 0 1 41 35 Z"
       />

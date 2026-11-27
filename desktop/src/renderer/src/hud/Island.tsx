@@ -1,19 +1,22 @@
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { AlertTriangle, AppWindow, ClipboardCheck, Mic, MicOff, Sparkles, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, type HudKind, type HudState } from '@shared/types'
 import { clock } from '../lib/format'
 import { island, snappy } from '../lib/motion'
 import { api } from '../lib/store'
 import { Recorder } from './recorder'
 
-/** Width and content height of the island for each state; the notch adds its own height on top. */
-const shapes: Record<HudKind, { width: number; height: number }> = {
-  recording: { width: 400, height: 46 }, microphone: { width: 320, height: 56 }, transcribing: { width: 400, height: 56 },
-  cleaning: { width: 400, height: 56 }, preparing: { width: 320, height: 56 }, done: { width: 400, height: 56 },
-  copied: { width: 400, height: 70 }, cancelled: { width: 240, height: 46 }, empty: { width: 320, height: 56 },
-  failed: { width: 380, height: 66 }, info: { width: 280, height: 52 }
+/**
+ * Width of the island for each state. The content is one row, plus one context line while recording
+ * or when there is a detail to read; the notch adds its own height on top.
+ */
+const widths: Record<HudKind, number> = {
+  recording: 360, microphone: 340, transcribing: 340, cleaning: 340, preparing: 320, done: 340,
+  copied: 380, cancelled: 220, empty: 320, failed: 380, info: 300
 }
+const ROW = 40
+const LINE = 22
+const RADIUS = 18
 
 interface Sample { time: number; level: number }
 
@@ -66,7 +69,7 @@ export function Island() {
     return () => window.clearTimeout(frame)
   }, [hud?.kind, hud?.visible, hud?.micQuiet])
 
-  // Hints and tips show briefly at the start of each recording, then the island tucks them away.
+  // Hints and tips show briefly at the start of each recording, then the line hands over to context.
   useEffect(() => {
     if (hud?.kind !== 'recording' || !hud.visible) { setHint(false); return }
     setHint(true)
@@ -77,15 +80,14 @@ export function Island() {
   if (!hud) return null
   const { screen } = hud
   const top = screen.hasNotch ? screen.notchHeight : 0
-  const shape = shapes[hud.kind] ?? shapes.info
   const open = hud.visible
-  const line = hud.kind === 'recording' ? subline(hud, hint) : null
-  const active = ['recording', 'transcribing', 'cleaning'].includes(hud.kind)
-  const words = hud.kind === 'recording' && !hud.micQuiet ? hud.live || (hint ? hud.note : '') : ''
-  const extra = (line ? 22 : 0) + (active ? 26 : 0) + (hud.kind === 'recording' && hud.micQuiet ? 30 : words ? 22 : 0)
-  const height = open ? top + shape.height + extra : screen.hasNotch ? top : 0
-  const width = open ? Math.max(shape.width, screen.notchWidth + 120) : screen.hasNotch ? screen.notchWidth : 120
-  const radius = open ? Math.min(24, (shape.height + extra) / 2) : 10
+  const recording = hud.kind === 'recording'
+  const line = recording ? subline(hud, hint) : null
+  const hasDetail = !recording && Boolean(hud.detail)
+  const content = ROW + (recording || hasDetail ? LINE : 0) + (hasDetail && hud.detail.length > 46 ? 14 : 0)
+  const height = open ? top + content : screen.hasNotch ? top : 0
+  const width = open ? Math.max(widths[hud.kind] ?? widths.info, screen.notchWidth + 120) : screen.hasNotch ? screen.notchWidth : 120
+  const radius = open ? RADIUS : 10
 
   return (
     <div className="stage">
@@ -94,17 +96,14 @@ export function Island() {
         animate={{ width, height, opacity: open ? 1 : 0, borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}
         transition={{ ...island, opacity: open ? { duration: 0.1 } : { delay: 0.26, duration: 0.16 } }}
         onAnimationComplete={() => { if (!visible.current) api.hudHidden() }}>
-        <div className="island-clip" role="status" aria-live="polite" aria-atomic="true" style={{ borderBottomLeftRadius: radius, borderBottomRightRadius: radius, ['--notch' as string]: `${top}px` }}>
+        <div className="island-clip" role="status" aria-live="polite" aria-atomic="true" style={{ borderBottomLeftRadius: radius, borderBottomRightRadius: radius }}>
           <AnimatePresence mode="popLayout" initial={false}>
             {open && (
-              <motion.div key={hud.kind} className="island-content" style={{ paddingTop: top }}
-                initial={{ opacity: 0, scale: 0.92, filter: 'blur(6px)' }}
+              <motion.div key={recording ? 'recording' : 'status'} className="island-content" style={{ paddingTop: top }}
+                initial={{ opacity: 0, scale: 0.94, filter: 'blur(6px)' }}
                 animate={{ opacity: 1, scale: 1, filter: 'blur(0px)', transition: { ...snappy, delay: 0.06 } }}
-                exit={{ opacity: 0, scale: 0.96, filter: 'blur(4px)', transition: { duration: 0.12 } }}>
-                <Content hud={hud} samples={samples} line={line} height={shape.height} />
-                {words && <div className={`island-sub ${hud.live ? 'live' : 'note'}`}>{hud.live ? <LiveText text={words} /> : words}</div>}
-                {hud.kind === 'recording' && hud.micQuiet && <div className="island-mic-warning"><MicOff size={12} /><span>Can’t hear you · {hud.microphone || 'Check your microphone'}</span></div>}
-                {active && <DestinationLine hud={hud} />}
+                exit={{ opacity: 0, scale: 0.97, filter: 'blur(4px)', transition: { duration: 0.12 } }}>
+                {recording ? <Recording hud={hud} samples={samples} line={line!} /> : <Status hud={hud} />}
               </motion.div>
             )}
           </AnimatePresence>
@@ -114,62 +113,80 @@ export function Island() {
   )
 }
 
-type Line = { kind: 'holding' | 'holdPending' | 'editing' | 'hint' }
+type Line = { kind: 'holding' | 'holdPending' | 'quiet' | 'editing' | 'live' | 'note' | 'hint' | 'destination'; text?: string }
 
 /** The one line under the waveform, by priority. */
-function subline(hud: HudState, early: boolean): Line | null {
+function subline(hud: HudState, early: boolean): Line {
   if (hud.holding) return { kind: 'holding' }
   if (hud.holdStartedAt !== null) return { kind: 'holdPending' }
+  if (hud.micQuiet) return { kind: 'quiet' }
+  if (hud.live) return { kind: 'live', text: hud.live }
   if (hud.editing && early) return { kind: 'editing' }
-  return { kind: 'hint' }
+  if (early && hud.note) return { kind: 'note', text: hud.note }
+  if (early) return { kind: 'hint' }
+  return { kind: 'destination' }
 }
 
-function Content({ hud, samples, line, height }: { hud: HudState; samples: React.RefObject<Sample[]>; line: Line | null; height: number }) {
-  if (hud.kind === 'recording') {
-    return (
-      <div className="island-recording">
-        <div className="island-row" style={{ height }}>
-          <LiveMark editing={hud.editing} />
-          <Waveform samples={samples} />
-          <Timer startedAt={hud.startedAt} />
-        </div>
-        <AnimatePresence mode="popLayout" initial={false}>
-          {line && (
-            <motion.div key={line.kind} className={`island-sub ${line.kind}`} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4, transition: { duration: 0.12 } }} transition={snappy}>
-              {line.kind === 'holdPending' ? <><HoldProgress startedAt={hud.holdStartedAt!} /><span>Keep holding for hold-to-talk</span></>
-                    : line.kind === 'holding' ? <><span className="hold-active-dot" />Release <kbd>⌃ Space</kbd> to finish</>
-                    : line.kind === 'editing' ? <>Editing selection · tap <kbd>⌃ Space</kbd> to finish</>
-                      : <><span>Tap <kbd>⌃ Space</kbd> to finish</span><span className="sep" /><kbd>esc</kbd> cancel</>}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    )
-  }
-  const icons: Partial<Record<HudKind, ReactNode>> = {
-    transcribing: <Spinner />, preparing: <Spinner />, cleaning: <Sparkles size={16} />,
-    done: <Check />, copied: <ClipboardCheck size={16} />, cancelled: <X size={16} strokeWidth={2.4} />,
-    empty: <MicOff size={16} />, failed: <AlertTriangle size={16} />, microphone: <Mic size={16} />
-  }
-  const shimmer = ['transcribing', 'cleaning', 'preparing'].includes(hud.kind)
+function Recording({ hud, samples, line }: { hud: HudState; samples: React.RefObject<Sample[]>; line: Line }) {
+  // Live words get the whole line; otherwise the destination sits at its right edge.
+  const showDestination = line.kind !== 'live' && line.kind !== 'destination'
   return (
-    <div className={`island-row kind-${hud.kind}`} style={{ height }}>
-      <span className="island-icon">{icons[hud.kind] ?? <Spinner />}</span>
-      <span className="island-text">
-        <span className={`island-title ${shimmer ? 'shimmer' : ''}`}>{hud.title}</span>
-        {hud.detail && <span className="island-detail">{hud.detail}</span>}
-      </span>
+    <div className="island-recording">
+      <div className="island-row" style={{ height: ROW }}>
+        <span className={`rec-led ${hud.editing ? 'editing' : ''}`} aria-hidden />
+        <DotMatrix samples={samples} />
+        <Timer startedAt={hud.startedAt} />
+      </div>
+      <div className="island-line" style={{ height: LINE }}>
+        <AnimatePresence mode="popLayout" initial={false}>
+          <motion.span key={line.kind} className={`line-main ${line.kind}`} initial={{ opacity: 0, y: -3 }} animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 3, transition: { duration: 0.1 } }} transition={snappy}>
+            <LineContent hud={hud} line={line} />
+          </motion.span>
+        </AnimatePresence>
+        {showDestination && <Destination hud={hud} compact />}
+      </div>
     </div>
   )
 }
 
-function DestinationLine({ hud }: { hud: HudState }) {
+function LineContent({ hud, line }: { hud: HudState; line: Line }) {
+  switch (line.kind) {
+    case 'holdPending': return <><HoldProgress startedAt={hud.holdStartedAt!} /><span>Keep holding to talk</span></>
+    case 'holding': return <><span className="hold-dot" />Release <kbd>⌃ Space</kbd> to finish</>
+    case 'quiet': return <span className="ellipsis">Can’t hear you · {hud.microphone || 'check your microphone'}</span>
+    case 'live': return <LiveText text={line.text!} />
+    case 'editing': return <>Editing selection · <kbd>⌃ Space</kbd> to finish</>
+    case 'note': return <span className="ellipsis">{line.text}</span>
+    case 'hint': return <><kbd>⌃ Space</kbd> finish <kbd>esc</kbd> cancel</>
+    case 'destination': return <Destination hud={hud} />
+  }
+}
+
+function Status({ hud }: { hud: HudState }) {
+  const processing = ['transcribing', 'cleaning', 'preparing'].includes(hud.kind)
+  return (
+    <div className={`island-status kind-${hud.kind}`}>
+      <div className="island-row" style={{ height: ROW }}>
+        <span className="status-glyph">{processing ? <ScanMatrix /> : <Glyph kind={hud.kind} />}</span>
+        <span className={`island-title ${processing ? 'shimmer' : ''}`}>{hud.title}</span>
+        {processing && <Destination hud={hud} compact />}
+      </div>
+      {hud.detail && <div className="island-detail">{hud.detail}</div>}
+    </div>
+  )
+}
+
+function Destination({ hud, compact = false }: { hud: HudState; compact?: boolean }) {
   const destination = hud.destination
-  return <div className="island-destination">
-    {destination?.icon ? <img src={destination.icon} width={14} height={14} alt="" /> : <AppWindow size={13} aria-hidden />}
-    <span>{destination?.appName ? `${destination.editable === false ? 'No text box in' : 'Current app:'} ${destination.appName}` : 'Text goes to your focused field'}</span>
-  </div>
+  if (compact && !destination?.appName) return null
+  const blocked = destination?.editable === false
+  return (
+    <span className={`destination ${compact ? 'compact' : ''} ${blocked ? 'blocked' : ''}`}>
+      {destination?.icon ? <img src={destination.icon} width={12} height={12} alt="" /> : <span className="destination-arrow">→</span>}
+      <span className="ellipsis">{destination?.appName ? (blocked ? `No text box in ${destination.appName}` : destination.appName) : 'Your focused text field'}</span>
+    </span>
+  )
 }
 
 function HoldProgress({ startedAt }: { startedAt: number }) {
@@ -228,84 +245,93 @@ function Timer({ startedAt }: { startedAt: number | null }) {
   return <span className={`island-time ${seconds >= MAX_DICTATION_SECONDS - 30 ? 'late' : ''}`}>{clock(seconds)}</span>
 }
 
-function Spinner() {
-  return <span className="spinner" aria-hidden><span /></span>
+/** Status glyphs drawn on the same 5×5 dot grid as the waveform; the lit dots arrive in order. */
+const glyphs: Partial<Record<HudKind, string[]>> = {
+  done: ['.....', '....#', '...#.', '#.#..', '.#...'],
+  copied: ['####.', '#..#.', '#.###', '###.#', '..###'],
+  cancelled: ['#...#', '.#.#.', '..#..', '.#.#.', '#...#'],
+  empty: ['.....', '.....', '#####', '.....', '.....'],
+  failed: ['..#..', '..#..', '..#..', '.....', '..#..'],
+  microphone: ['.###.', '.###.', '.###.', '#.#.#', '..#..'],
+  info: ['..#..', '.....', '..#..', '..#..', '..#..']
 }
 
-function Check() {
+function Glyph({ kind }: { kind: HudKind }) {
+  const pattern = glyphs[kind] ?? glyphs.info!
+  let order = 0
   return (
-    <svg width="20" height="20" viewBox="0 0 20 20" className="check-draw" aria-hidden>
-      <circle cx="10" cy="10" r="9" className="check-circle" />
-      <path d="M6 10.4l2.6 2.6L14.2 7.4" className="check-path" />
+    <svg width="17" height="17" viewBox="0 0 17 17" className="glyph" aria-hidden>
+      {pattern.flatMap((row, y) => [...row].map((cell, x) => {
+        const lit = cell === '#'
+        return <circle key={`${x}-${y}`} cx={2.5 + x * 3} cy={2.5 + y * 3} r={lit ? 1.25 : 1.05} className={lit ? 'lit' : 'off'}
+          style={lit ? { animationDelay: `${(order++) * 28}ms` } : undefined} />
+      }))}
     </svg>
   )
 }
 
-/** The Dictait mark in the logo's gradient, glowing while it listens. */
-function LiveMark({ editing }: { editing: boolean }) {
+/** Processing: a band of light sweeping across a small dot grid. */
+function ScanMatrix() {
   return (
-    <svg className={`live-mark ${editing ? 'editing' : ''}`} viewBox="24 21 57 66" aria-hidden>
-      <defs>
-        <linearGradient id="live-mark" x1="0.15" y1="0" x2="0.85" y2="1"><stop offset="0" stopColor="#FF9456" /><stop offset="1" stopColor="#FF4A2E" /></linearGradient>
-      </defs>
-      <path fill="url(#live-mark)" fillRule="evenodd" d="M26 31 C26 26.6 29.6 23 34 23 H50 A27 27 0 0 1 50 77 H40 L29.5 85.2 C28 86.4 26 85.3 26 83.4 Z M41 35 H55 A2.5 2.5 0 0 1 55 40 H50.5 V60 H55 A2.5 2.5 0 0 1 55 65 H41 A2.5 2.5 0 0 1 41 60 H45.5 V40 H41 A2.5 2.5 0 0 1 41 35 Z" />
+    <svg width="23" height="17" viewBox="0 0 23 17" className="scan-matrix" aria-hidden>
+      {Array.from({ length: 7 }, (_, x) => Array.from({ length: 5 }, (_, y) => (
+        <circle key={`${x}-${y}`} cx={2.5 + x * 3} cy={2.5 + y * 3} r={1.05} style={{ animationDelay: `${x * 90 + Math.abs(y - 2) * 45}ms` }} />
+      )))}
     </svg>
   )
 }
 
-/** The voice as a ribbon of light: a mirrored, smoothed trace that glides left and swells with the level. */
-function Waveform({ samples }: { samples: React.RefObject<Sample[]> }) {
+/**
+ * The voice as a dot-matrix readout: columns of dots scroll left with time and light up from the
+ * centre with the level. Silence leaves a single, breathing centre row.
+ */
+function DotMatrix({ samples }: { samples: React.RefObject<Sample[]> }) {
   const canvas = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const element = canvas.current
     const context = element?.getContext('2d')
     if (!element || !context) return
-    const width = 196, height = 30, ratio = window.devicePixelRatio || 2
+    const width = 220, height = 24, ratio = window.devicePixelRatio || 2
+    const pitch = 4, rows = 7, dot = 1.3
     element.width = width * ratio; element.height = height * ratio
     context.scale(ratio, ratio)
-    const speed = 4 / 32 // px per ms
-    const fill = context.createLinearGradient(0, 0, width, 0)
-    fill.addColorStop(0, 'rgba(255,148,86,0)'); fill.addColorStop(0.35, 'rgba(255,148,86,0.38)'); fill.addColorStop(1, 'rgba(255,74,46,0.5)')
-    const edge = context.createLinearGradient(0, 0, width, 0)
-    edge.addColorStop(0, 'rgba(255,148,86,0)'); edge.addColorStop(0.3, '#FF9456'); edge.addColorStop(1, '#FF4A2E')
+    const columns = Math.floor(width / pitch)
+    const top = (height - (rows - 1) * pitch) / 2
+    const speed = pitch / 46 // one column every ~46 ms
+    const shown = new Float32Array(columns)
     let frame = 0
     const draw = () => {
       const now = performance.now()
       context.clearRect(0, 0, width, height)
       const list = samples.current ?? []
-      // Points every 4 px from the right edge back in time; quiet reads as a calm, breathing line.
-      const points: number[] = []
-      for (let x = width, i = list.length - 1; x >= -4; x -= 4) {
+      for (let c = columns - 1, i = list.length - 1; c >= 0; c--) {
+        const x = c * pitch + pitch / 2
         const at = now - (width - x) / speed
         while (i > 0 && list[i].time > at) i--
         const sample = list[i]
         const level = sample && Math.abs(sample.time - at) < 120 ? sample.level : 0
-        const breath = 0.06 + 0.03 * Math.sin(now / 420 + x / 18)
-        points.push(Math.max(breath, Math.pow(level, 1.1)) * (height / 2 - 2))
-      }
-      // Two passes of a three-point average: a ribbon, not a seismograph.
-      for (let pass = 0; pass < 2; pass++) {
-        for (let k = 1; k < points.length - 1; k++) points[k] = (points[k - 1] + points[k] * 2 + points[k + 1]) / 4
-      }
-      const half = height / 2
-      const trace = (sign: number) => {
-        context.moveTo(width, half - sign * points[0])
-        for (let k = 1; k < points.length; k++) {
-          const x0 = width - (k - 1) * 4, x1 = width - k * 4
-          context.quadraticCurveTo(x0, half - sign * points[k - 1], (x0 + x1) / 2, half - sign * (points[k - 1] + points[k]) / 2)
+        // Ease each column toward its level so the readout settles rather than flickers.
+        shown[c] += (Math.min(1, Math.pow(level, 0.9) * 1.25) - shown[c]) * 0.35
+        const reach = shown[c] * (rows / 2)
+        const fade = Math.min(1, 0.12 + (c / columns) * 1.25)
+        for (let r = 0; r < rows; r++) {
+          const distance = Math.abs(r - (rows - 1) / 2)
+          const lit = distance <= reach - 0.15
+          const centre = distance === 0
+          const breath = centre ? 0.32 + 0.14 * Math.sin(now / 380 - c / 5) : 0
+          const alpha = lit ? fade * (1 - distance * 0.1) : Math.max(breath * fade, 0.09)
+          context.globalAlpha = alpha
+          context.fillStyle = '#fff'
+          context.beginPath()
+          context.arc(x, top + r * pitch, lit ? dot + 0.15 : dot, 0, Math.PI * 2)
+          context.fill()
         }
       }
-      context.beginPath(); trace(1)
-      for (let k = points.length - 1; k >= 0; k--) context.lineTo(width - k * 4, half + points[k])
-      context.closePath()
-      context.fillStyle = fill; context.fill()
-      context.lineWidth = 1.6; context.strokeStyle = edge; context.lineJoin = 'round'
-      context.beginPath(); trace(1); context.stroke()
-      context.beginPath(); trace(-1); context.stroke()
+      context.globalAlpha = 1
       frame = requestAnimationFrame(draw)
     }
     frame = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(frame)
   }, [samples])
-  return <canvas ref={canvas} className="waveform" style={{ width: 196, height: 30 }} aria-hidden />
+  return <canvas ref={canvas} className="dot-matrix" style={{ width: 220, height: 24 }} aria-hidden />
 }

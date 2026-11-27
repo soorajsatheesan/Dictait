@@ -1,7 +1,7 @@
 {
   "name": "dictait",
   "productName": "Dictait",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "description": "Private, local dictation for your Mac.",
   "license": "MIT",
   "private": true,
@@ -11,14 +11,15 @@
     "web": "vite --config vite.web.config.ts",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "node --test tests/coordinator.test.cjs tests/hud.test.cjs tests/recorder.test.cjs tests/updater.test.cjs",
+    "test": "node --test tests/coordinator.test.cjs tests/hud.test.cjs tests/recorder.test.cjs tests/tray.test.cjs tests/updater.test.cjs",
     "test:focus": "node --test tests/native-focus.test.cjs",
     "helper": "bash scripts/build-helper.sh",
     "package": "npm run helper && electron-vite build && electron-builder --mac dir --arm64"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/doto": "^5.3.0",
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
     "@types/d3-force": "^3.0.10",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",

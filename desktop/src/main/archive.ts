@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Archive, ArchivedNote } from '@shared/types'
+import type { Archive, ArchivedNote, HistoryEntry } from '@shared/types'
 import { SUPPORT } from './paths'
 
 // Everyday words that older versions learned as "terms" (Let, So, First); hidden, never deleted.
@@ -32,6 +32,25 @@ function nameLike(term: string): boolean {
   const ordinary = (word: string) => COMMON.has(word) || words().has(word)
   if (parts.length === 1) return !ordinary(parts[0])
   return !parts.some((word) => COMMON.has(word)) || parts.some((word) => !ordinary(word))
+}
+
+/** Fill the menu with already-saved dictations from before the app started. */
+export async function readRecentSavedDictations(before: number): Promise<HistoryEntry[]> {
+  const path = join(SUPPORT, 'memory.sqlite3')
+  if (!existsSync(path)) return []
+  try {
+    const { DatabaseSync } = await import('node:sqlite')
+    const database = new DatabaseSync(path, { readOnly: true, timeout: 1000 })
+    try {
+      const rows = database.prepare('SELECT body, created FROM notes WHERE created < ? ORDER BY created DESC, rowid DESC LIMIT 2')
+        .all(before / 1000) as { body: string; created: number }[]
+      return rows.map((row) => ({ text: row.body, at: Number(row.created) * 1000, app: '' }))
+    } finally {
+      database.close()
+    }
+  } catch {
+    return []
+  }
 }
 
 /** Reads the worker's SQLite archive directly and read-only. No HTTP service or browser process. */

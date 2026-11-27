@@ -5,7 +5,8 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
@@ -100,6 +101,42 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(events[-1]["text"], "I has 12 apples.")
             self.assertIsNone(events[-1]["warning"])
 
+    def test_cleanup_unchanged_marker_preserves_the_dictation(self):
+        engine = worker.Engine(memory=False)
+        engine.llm = Mock()
+        engine.tokenizer = Mock()
+        engine.tokenizer.encode.return_value = list(range(10))
+        engine.prompt = Mock(return_value=[1, 2, 3])
+        text = "Please send the invoice before Tuesday."
+
+        def unchanged(*args, **kwargs):
+            yield SimpleNamespace(text="<unchanged>", finish_reason="stop")
+
+        modules = {
+            "mlx_lm": SimpleNamespace(stream_generate=unchanged),
+            "mlx_lm.sample_utils": SimpleNamespace(make_sampler=Mock()),
+        }
+        with patch.dict(sys.modules, modules):
+            self.assertEqual(engine.clean(text), (text, None))
+
+    def test_incomplete_model_output_still_keeps_the_requested_list(self):
+        engine = worker.Engine(memory=False)
+        engine.llm = Mock()
+        engine.tokenizer = Mock()
+        engine.tokenizer.encode.return_value = [1]
+        engine.prompt = Mock(return_value=[1, 2, 3])
+
+        def incomplete(*args, **kwargs):
+            yield SimpleNamespace(text="1. Call Maya.", finish_reason="length")
+
+        modules = {
+            "mlx_lm": SimpleNamespace(stream_generate=incomplete),
+            "mlx_lm.sample_utils": SimpleNamespace(make_sampler=Mock()),
+        }
+        with patch.dict(sys.modules, modules):
+            self.assertEqual(engine.clean("Number these. Call Maya. Send the deck."),
+                             ("1. Call Maya.\n2. Send the deck.", None))
+
     def test_reviewed_correction_keeps_changes_beyond_the_first_240_characters(self):
         engine = FakeEngine()
         prefix = "Keep the rest of this sentence unchanged. " * 8
@@ -111,13 +148,44 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(engine.examples[0]["corrected"], corrected)
 
     def test_practice_memory_off_never_reads_or_writes_the_memory_store(self):
-        from unittest.mock import Mock
         engine = FakeEngine()
         engine.memory = Mock()
         with tempfile.TemporaryDirectory() as directory:
             events = self.run_request(engine, make_wav(directory), memory="off")
         self.assertEqual(events[-1]["event"], "result")
         self.assertEqual(engine.memory.mock_calls, [])
+
+    def test_note_indexing_yields_to_new_dictation_and_preserves_fallback_terms(self):
+        from memory import fallback_entities
+
+        engine = worker.Engine()
+        engine.memory = Mock()
+        engine.llm = Mock()
+        engine.tokenizer = Mock()
+        text = "Ask Maya about Dictait."
+        pending = Mock(side_effect=[False, False, True])
+        tokens = []
+        closed = []
+
+        def stream_generate(*args, **kwargs):
+            try:
+                for token in ('[', '{"term":"Maya"}', ']'):
+                    tokens.append(token)
+                    yield SimpleNamespace(text=token)
+            finally:
+                closed.append(True)
+
+        modules = {
+            "mlx_lm": SimpleNamespace(stream_generate=stream_generate),
+            "mlx_lm.sample_utils": SimpleNamespace(make_sampler=Mock()),
+        }
+        with patch.dict(sys.modules, modules):
+            engine.index_memory(text, "en", note_id="saved", input_pending=pending)
+
+        self.assertEqual(tokens, ['[', '{"term":"Maya"}'])
+        self.assertEqual(closed, [True])
+        engine.memory.attach_terms.assert_called_once_with("saved", fallback_entities(text), text=text)
+        engine.memory.write_note.assert_called_once_with("saved")
 
     def test_silence_never_reaches_models(self):
         engine = FakeEngine()
@@ -156,6 +224,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(worker.writing_intent("Open the app. Click record. Number these."), ("numbered", "Open the app. Click record"))
         self.assertEqual(worker.writing_intent("Make this shorter: the meeting moved to Friday because Maya is away."), ("concise", "the meeting moved to Friday because Maya is away."))
         self.assertEqual(worker.writing_intent("Thanks for the update. Make it more formal."), ("formal", "Thanks for the update"))
+        self.assertEqual(worker.writing_intent("Could you split this up into paragraphs? The release is ready."),
+                         ("paragraphs", "The release is ready."))
+        self.assertEqual(worker.writing_intent("The release is ready. Could you convert this into an email?"),
+                         ("email", "The release is ready"))
         self.assertEqual(worker.writing_intent("We need a list of names for the party."), ("cleanup", "We need a list of names for the party."))
         self.assertEqual(worker.writing_intent("Understand and summarize this. Make it into points. We need notes and a graph."), ("summary_bullets", "We need notes and a graph."))
         literal = 'I told Maya to summarize this report.'
@@ -246,6 +318,26 @@ class WorkerTests(unittest.TestCase):
             events = run_session(engine, directory, 1, selection="old text")
         self.assertNotIn("mode", events[-1])
         self.assertEqual(engine.edits, [])
+
+    def test_short_auto_transcription_keeps_language_and_vocabulary_hint(self):
+        engine = worker.Engine(memory=False)
+        engine.stt = Mock()
+        engine.vocabulary = [{"word": "Maya"}]
+        audio = object()
+        with patch.object(engine, "whisper_single_window", return_value=("Bonjour Maya.", "fr")) as single_window:
+            self.assertEqual(engine.transcribe(audio, "auto", "Un message"), "Bonjour Maya.")
+        single_window.assert_called_once_with(audio, "Maya. Un message")
+        engine.stt.transcribe.assert_not_called()
+        self.assertEqual(engine.detected_language, "fr")
+
+    def test_short_auto_transcription_falls_back_with_detected_language(self):
+        engine = worker.Engine(memory=False)
+        engine.stt = Mock()
+        engine.stt.transcribe.return_value = {"language": "hi", "segments": [{"text": "नमस्ते।"}]}
+        with patch.object(engine, "whisper_single_window", return_value=(None, "hi")):
+            self.assertEqual(engine.transcribe(object(), "auto"), "नमस्ते।")
+        self.assertEqual(engine.stt.transcribe.call_args.kwargs["language"], "hi")
+        self.assertEqual(engine.detected_language, "hi")
 
     def test_whisper_loops_collapse_to_one_copy(self):
         loop = "In bullet points. Third, who is the third person to climb Everest? " * 9 + "Third, who is the third person to climb"
@@ -413,6 +505,73 @@ class HeyInstructionTests(unittest.TestCase):
         engine.clean = lambda text, budget=2.5, smart=None, intent=None: ("- " + text if intent == "bullets" else text, None)
         self.assertEqual(self.run_request(engine)["text"], "- We ship Friday.\n\nThen we rest.")
 
+    def test_natural_points_command_preserves_each_spoken_item(self):
+        engine = NoteTaker("Points, make this points, one. Make it more accurate, two, make it faster, three. Make it more intuitive.", llm=False)
+        result = self.run_request(engine, cleanup=False)
+        self.assertEqual(result["text"], "- Make it more accurate\n- Make it faster\n- Make it more intuitive.")
+
+    def test_points_command_inside_dictation_keeps_surrounding_prose(self):
+        engine = NoteTaker("We need two changes. Make this points, first fix spelling. Second check number 3.5. "
+                           "New paragraph. The deadline is Friday.", llm=False)
+        result = self.run_request(engine, cleanup=False)
+        self.assertEqual(result["text"], "We need two changes.\n\n- Fix spelling.\n- Check number 3.5.\n\nThe deadline is Friday.")
+
+    def test_hey_points_with_spoken_items_is_not_a_previous_dictation_edit(self):
+        engine = NoteTaker("Hey, make this points, one, check the logs, two, restart the app.", llm=False)
+        result = self.run_request(engine, cleanup=False, previous_output="Earlier text.")
+        self.assertEqual(result["text"], "- Check the logs\n- Restart the app.")
+        self.assertEqual(engine.edits, [])
+
+    def test_spoken_numbers_create_a_numbered_list_when_formatting_is_on(self):
+        raw = "One. Call Maya. Two, send the file."
+        self.assertEqual(self.run_request(NoteTaker(raw), cleanup=False, context="After this")["text"],
+                         "\n1. Call Maya.\n2. Send the file.")
+        self.assertEqual(self.run_request(NoteTaker(raw), cleanup=False, context="After this\n")["text"],
+                         "1. Call Maya.\n2. Send the file.")
+        self.assertEqual(self.run_request(NoteTaker(raw), cleanup=False, smart_formatting=False)["text"], raw)
+
+    def test_polite_list_questions_work_at_either_end_without_cleanup(self):
+        for raw, expected in [
+            ("Can you make this points? One, call Maya. Two, send the deck.", "- Call Maya.\n- Send the deck."),
+            ("Call Maya. Send the deck. Could you number these?", "1. Call Maya.\n2. Send the deck"),
+            ("Could you make this a numbered list? Call Dr. Maya; check version 3.5; send the deck.",
+             "1. Call Dr. Maya\n2. Check version 3.5\n3. Send the deck."),
+            ("Make this numbered points. One, call Maya. Two, send the deck.", "1. Call Maya.\n2. Send the deck."),
+            ("Bullet points. Call Maya. Send the deck.", "- Call Maya.\n- Send the deck."),
+            ("Numbered list. Call Maya. Send the deck.", "1. Call Maya.\n2. Send the deck."),
+            ("Could you make this a numbered list? Call Maya, send the deck.", "1. Call Maya\n2. Send the deck."),
+            ("Make this numbered points. Call Maya, if she's free.", "1. Call Maya, if she's free."),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.run_request(NoteTaker(raw, llm=False), cleanup=False)["text"], expected)
+
+    def test_spoken_breaks_survive_at_the_edges_of_cleaned_text(self):
+        engine = NoteTaker("New line. Call Maya. New paragraph.")
+        engine.clean = lambda text: (text.strip(), None)
+        self.assertEqual(self.run_request(engine, context="Draft")["text"], "\nCall Maya.\n\n")
+        self.assertEqual(self.run_request(NoteTaker("New paragraph.", llm=False))["text"], "\n\n")
+        self.assertEqual(self.run_request(NoteTaker("New Line Call Maya New Paragraph"), cleanup=False)["text"],
+                         "\nCall Maya\n\n")
+        literal = "New line items should be added to the new paragraph"
+        self.assertEqual(worker.apply_voice_commands(literal), literal)
+        self.assertFalse(worker.valid_edit("Call Maya.\n\nSend the deck.", "Call Maya. Send the deck."))
+
+    def test_points_shorthand_does_not_repeat_duplicate_numbered_lines(self):
+        raw = "Points. 1. Make it accurate. 2. Make it faster. 3. Make it clearer. 3. Make it clearer."
+        self.assertEqual(self.run_request(NoteTaker(raw), cleanup=False)["text"],
+                         "- Make it accurate.\n- Make it faster.\n- Make it clearer.")
+
+    def test_plain_prose_and_decimal_values_are_not_list_labels(self):
+        for raw in ("First impressions matter. Second place can still be good.",
+                    "One cup is enough. Two cups is too much.",
+                    "Number one hit of the summer. Number two came out in June.",
+                    "Bullet points look clear on the page.",
+                    "Numbered lists help me stay organized.",
+                    "The update is 1.2. The next one is 2.3."):
+            self.assertIsNone(worker.format_spoken_list(raw))
+        self.assertEqual(worker.format_spoken_list("Make this points: Number 1, get in at 3.5. Point two, check 2 inputs."),
+                         "- Get in at 3.5.\n- Check 2 inputs.")
+
     def test_follow_up_rewrites_the_last_paste(self):
         engine = NoteTaker("Hey, make that shorter.")
         event = self.run_request(engine, previous_output=" we will meet maya on tuesday at the office")
@@ -461,11 +620,29 @@ class HeyInstructionTests(unittest.TestCase):
         self.assertFalse(worker.valid_edit(raw_hi, "आज मौसम।"))
         self.assertTrue(worker.valid_edit(raw_hi, raw_hi))
 
+    def test_cleanup_preserves_negations_and_allows_expanded_contractions(self):
+        self.assertFalse(worker.valid_edit("Do not send the invoice.", "Do send the invoice."))
+        self.assertFalse(worker.valid_edit("Maya can attend.", "Maya cannot attend."))
+        self.assertFalse(worker.valid_edit("I won't send it, and Sam won't either.", "I’ll send it, and Sam won't either."))
+        self.assertTrue(worker.valid_edit("I can’t attend.", "I cannot attend."))
+        self.assertTrue(worker.valid_edit("I won't attend.", "I will not attend."))
+        self.assertTrue(worker.valid_edit("Pick no. 2.", "Pick number 2."))
+
     def test_voice_commands_preserve_question_exclamation_and_decimals(self):
         self.assertEqual(worker.apply_voice_commands("Are you coming? New paragraph. Let me know."), "Are you coming?\n\nLet me know.")
         self.assertEqual(worker.apply_voice_commands("Watch out! New line. Next step."), "Watch out!\nNext step.")
         self.assertEqual(worker.apply_voice_commands("Keep this. The version is 3.5. Scratch that."), "Keep this.")
         self.assertEqual(worker.apply_voice_commands("Keep this. Meet Dr. Smith tomorrow. Scratch that."), "Keep this.")
+
+    def test_spoken_punctuation_preserves_literal_mentions(self):
+        raw = "Where is the file, question mark. I found it, exclamation point."
+        self.assertEqual(worker.apply_voice_commands(raw), "Where is the file? I found it!")
+        literal = "The phrase, question mark, appears on the slide."
+        self.assertEqual(worker.apply_voice_commands(literal), literal)
+
+    def test_scratch_the_last_line_removes_the_whole_line(self):
+        raw = "Keep this. New line. Remove this sentence. Remove this one too. Scratch the last line. Keep the next line."
+        self.assertEqual(worker.normalize_dictation(raw), "Keep this.\nKeep the next line.")
 
 if __name__ == "__main__":
     unittest.main()
