@@ -30,7 +30,7 @@ body.hud { overflow: hidden; }
 .line-main { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; }
 .line-main.live { color: rgba(255, 255, 255, 0.85); }
 .line-main.quiet { color: #F5B544; }
-.line-main.holding, .line-main.holdPending, .line-main.editing { color: rgba(255, 255, 255, 0.82); }
+.line-main.holding, .line-main.holdPending, .line-main.editing, .line-main.translating { color: rgba(255, 255, 255, 0.82); }
 .island-line kbd { padding: 2px 5px; border-radius: 4px; font: 500 10.5px/1.2 var(--font-ui); color: rgba(255, 255, 255, 0.85); background: rgba(255, 255, 255, 0.1); }
 .island-line kbd + kbd, .line-main.hint kbd:nth-of-type(2) { margin-left: 6px; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

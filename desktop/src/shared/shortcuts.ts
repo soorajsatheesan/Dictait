@@ -3,7 +3,7 @@
 export type ShortcutModifier = 'control' | 'option' | 'shift' | 'command'
 /** A modifier pressed on its own: tap to start and finish, hold to talk. */
 export type ModifierKey = 'rightCommand' | 'rightOption' | 'fn'
-export type ShortcutAction = 'dictate' | 'pasteLast' | 'learnCorrection'
+export type ShortcutAction = 'dictate' | 'translate' | 'pasteLast' | 'undoLast' | 'retryLast' | 'learnCorrection'
 
 export type Shortcut =
   /** Modifiers plus one key; `code` is the macOS virtual key code (49 is Space). */
@@ -14,12 +14,16 @@ export type Shortcuts = Record<ShortcutAction, Shortcut>
 
 export const DEFAULT_SHORTCUTS: Shortcuts = {
   dictate: { kind: 'chord', code: 49, modifiers: ['control'] },
+  translate: { kind: 'chord', code: 49, modifiers: ['control', 'shift'] },
   pasteLast: { kind: 'chord', code: 9, modifiers: ['control', 'option'] },
+  undoLast: { kind: 'chord', code: 6, modifiers: ['control', 'option'] },
+  retryLast: { kind: 'chord', code: 15, modifiers: ['control', 'option'] },
   learnCorrection: { kind: 'chord', code: 37, modifiers: ['control', 'option'] }
 }
 
 export const ACTION_NAMES: Record<ShortcutAction, string> = {
-  dictate: 'Start and finish', pasteLast: 'Paste last dictation', learnCorrection: 'Review a correction'
+  dictate: 'Start and finish', translate: 'Speak to translate', pasteLast: 'Paste last dictation', undoLast: 'Undo last dictation',
+  retryLast: 'Retry failed dictation', learnCorrection: 'Review a correction'
 }
 
 /** macOS order: ⌃ ⌥ ⇧ ⌘. */

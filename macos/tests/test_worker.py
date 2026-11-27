@@ -56,7 +56,7 @@ def run_session(engine, directory, pieces, **final):
     requests.append({"command": "transcribe", "id": "s", "path": str(paths[-1]), **final})
     output = io.StringIO()
     worker.serve(engine, [json.dumps(request) for request in requests], output)
-    assert not any(path.exists() for path in paths)
+    assert all(path.exists() for path in paths), "The app owns the audio; the worker only reads it."
     return [json.loads(line) for line in output.getvalue().splitlines()]
 
 
@@ -78,14 +78,15 @@ class WorkerTests(unittest.TestCase):
         worker.serve(engine, [json.dumps(request)], output)
         return [json.loads(line) for line in output.getvalue().splitlines()]
 
-    def test_transcript_delivered_and_audio_deleted(self):
+    def test_transcript_delivered_and_audio_left_to_the_app(self):
         with tempfile.TemporaryDirectory() as directory:
             path = make_wav(directory)
             events = self.run_request(FakeEngine(), path)
             self.assertEqual(events[0]["event"], "transcribed")
             self.assertEqual(events[-1]["text"], "I have 12 apples.")
             self.assertEqual(events[-1]["raw"], "I has 12 apples.")
-            self.assertFalse(path.exists())
+            # The app deletes it after delivery, or keeps it for a retry if the dictation fails.
+            self.assertTrue(path.exists())
 
     def test_cleanup_failure_preserves_raw(self):
         engine = FakeEngine()
@@ -194,13 +195,13 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(engine.calls, 0)
             self.assertEqual(events[-1]["text"], "")
 
-    def test_bad_audio_deleted_and_error_is_visible(self):
+    def test_failed_audio_is_kept_for_a_retry_and_the_error_is_visible(self):
         with tempfile.TemporaryDirectory() as directory:
             path = make_wav(directory, rate=8000)
             events = self.run_request(FakeEngine(), path)
             self.assertEqual(events[-1]["event"], "error")
             self.assertIn("16 kHz", events[-1]["message"])
-            self.assertFalse(path.exists())
+            self.assertTrue(path.exists())
 
     def test_bad_request_does_not_kill_worker(self):
         output = io.StringIO()
@@ -434,7 +435,6 @@ class WorkerTests(unittest.TestCase):
             worker.serve(engine, [json.dumps(request) for request in requests], output)
             events = [json.loads(line) for line in output.getvalue().splitlines()]
             self.assertEqual(events[-1]["raw"], "fresh start.")
-            self.assertFalse(first.exists() or second.exists())
 
     def test_parts_join_without_breaking_sentences(self):
         self.assertEqual(worker.join_parts(["We met", "and agreed.", "", "Next steps."]), "We met and agreed.\n\nNext steps.")
@@ -652,6 +652,12 @@ class HeyInstructionTests(unittest.TestCase):
         self.assertFalse(worker.valid_edit(raw_hi, "आज मौसम।"))
         self.assertTrue(worker.valid_edit(raw_hi, raw_hi))
 
+    def test_spoken_self_corrections_are_not_negations(self):
+        self.assertTrue(worker.valid_edit("Let's meet at five, no, at six.", "Let's meet at six."))
+        self.assertTrue(worker.valid_edit("Send it to Bob, no, Alice.", "Send it to Alice."))
+        self.assertTrue(worker.valid_edit("Send it to Bob—no, wait, Alice.", "Send it to Alice."))
+        self.assertFalse(worker.valid_edit("Did you send it? No. I forgot.", "Did you send it? I forgot."))
+
     def test_cleanup_preserves_negations_and_allows_expanded_contractions(self):
         self.assertFalse(worker.valid_edit("Do not send the invoice.", "Do send the invoice."))
         self.assertFalse(worker.valid_edit("Maya can attend.", "Maya cannot attend."))
@@ -675,6 +681,166 @@ class HeyInstructionTests(unittest.TestCase):
     def test_scratch_the_last_line_removes_the_whole_line(self):
         raw = "Keep this. New line. Remove this sentence. Remove this one too. Scratch the last line. Keep the next line."
         self.assertEqual(worker.normalize_dictation(raw), "Keep this.\nKeep the next line.")
+
+
+class Speaker:
+    """Says one fixed transcript and records what cleanup, translation and editing were asked to do."""
+    smart_formatting = True
+    clean_long = worker.Engine.clean_long
+    follow = worker.Engine.follow
+
+    def __init__(self, said, cleaned=None, translated="Translated."):
+        self.said = said
+        self.cleaned_as = cleaned
+        self.translated = translated
+        self.llm = object()
+        self.cleanup_error = None
+        self.context = ""
+        self.cleaned, self.translations, self.edits = [], [], []
+        self.languages = []
+
+    def transcribe(self, audio, language, previous=""):
+        self.languages.append(language)
+        return self.said
+
+    def clean(self, text, budget=2.5, smart=None, intent=None):
+        self.cleaned.append(text)
+        return (self.cleaned_as(text) if self.cleaned_as else text), None
+
+    def translate(self, text):
+        self.translations.append(text)
+        return self.translated, None
+
+    def edit(self, selection, instruction):
+        self.edits.append((selection, instruction))
+        return selection, None
+
+
+CALENDLY = {"trigger": "my calendly", "content": "https://calendly.com/maya/30min"}
+SIGNATURE = {"trigger": "signature", "content": "Best,\nMaya\nhttps://maya.dev"}
+
+
+class SnippetTests(unittest.TestCase):
+    def run_request(self, engine, **kwargs):
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            request = {"command": "transcribe", "id": "s", "path": str(make_wav(directory)), **kwargs}
+            worker.serve(engine, [json.dumps(request)], output)
+            return json.loads(output.getvalue().splitlines()[-1])
+
+    def test_snippets_are_bounded(self):
+        many = [{"trigger": f"t{i}", "content": "x" * 5000} for i in range(150)]
+        snippets = worker.normalize_snippets(many + ["bad", {"trigger": "...", "content": "x"}, {"trigger": "ok", "content": "  "}])
+        self.assertEqual(len(snippets), 100)
+        self.assertEqual(len(snippets[0]["content"]), 2000)
+        self.assertEqual(worker.normalize_snippets("nope"), [])
+
+    def test_a_whole_dictation_trigger_pastes_the_snippet_exactly_without_cleanup(self):
+        for said in ["Insert my Calendly.", "my calendly", "Paste, my calendly!", "Please insert my, Calendly."]:
+            engine = Speaker(said)
+            event = self.run_request(engine, snippets=[CALENDLY, SIGNATURE])
+            self.assertEqual((event["mode"], event["text"]), ("snippet", CALENDLY["content"]), said)
+            self.assertEqual(engine.cleaned, [])
+        engine = Speaker("Signature.")
+        engine.memory = Mock(**{"vocabulary.return_value": []})
+        event = self.run_request(engine, snippets=[SIGNATURE], context="Thanks for the help.")
+        self.assertEqual(event["text"], " Best,\nMaya\nhttps://maya.dev")
+        engine.memory.remember.assert_not_called()
+
+    def test_inline_triggers_are_kept_away_from_cleanup(self):
+        engine = Speaker("You can book time at my calendly whenever you like.",
+                         cleaned=lambda text: text.replace("You can book", "Book").replace("whenever", "when"))
+        event = self.run_request(engine, snippets=[CALENDLY])
+        self.assertEqual(engine.cleaned, ["You can book time at {{SNIPPET_0}} whenever you like."])
+        self.assertEqual(event["text"], "Book time at https://calendly.com/maya/30min when you like.")
+
+    def test_cleanup_that_loses_a_placeholder_falls_back_to_the_spoken_words(self):
+        engine = Speaker("Here is my calendly for Friday.", cleaned=lambda text: "Here is the link for Friday.")
+        event = self.run_request(engine, snippets=[CALENDLY])
+        self.assertEqual(event["text"], "Here is https://calendly.com/maya/30min for Friday.")
+
+    def test_triggers_never_match_inside_words_and_single_words_need_insert(self):
+        protect = worker.protect_snippets
+        self.assertEqual(protect("Visit mycalendlyx today.", [CALENDLY]), ("Visit mycalendlyx today.", []))
+        self.assertEqual(protect("My signature move is a spin.", [SIGNATURE]), ("My signature move is a spin.", []))
+        self.assertEqual(protect("Thanks. Insert signature.", [SIGNATURE]), ("Thanks. {{SNIPPET_0}}.", [SIGNATURE["content"]]))
+        self.assertIsNone(worker.snippet_for("Send my calendly link", [CALENDLY]))
+        self.assertIsNone(worker.restore_snippets("{{SNIPPET_0}} and {{SNIPPET_0}}", ["x"]))
+        self.assertEqual(worker.restore_snippets("{{ snippet_0 }}!", ["x"]), "x!")
+
+    def test_long_dictations_expand_triggers_after_their_stretches_are_tidied(self):
+        engine = ChunkEngine(["word " * 160 + "then my calendly.", "more words.", "done."])
+        with tempfile.TemporaryDirectory() as directory:
+            events = run_session(engine, directory, 3, snippets=[CALENDLY])
+        self.assertIn("then https://calendly.com/maya/30min.", events[-1]["text"])
+        self.assertTrue(events[-1]["text"].endswith("\n\nMore words. done."))  # Joined from tidied stretches.
+
+
+class UndoAndTranslateTests(unittest.TestCase):
+    run_request = SnippetTests.run_request
+
+    def test_undo_that_is_recognised_only_on_its_own(self):
+        for said in ["Undo that.", "Hey, undo that.", "hey dictait, undo that please", "Okay, revert my last dictation."]:
+            self.assertTrue(worker.is_undo_command(said), said)
+        for said in ["Please undo that file change and push.", "I want to undo that.", "Hey, undo the migration."]:
+            self.assertFalse(worker.is_undo_command(said), said)
+
+    def test_undo_that_asks_the_app_to_remove_the_last_paste(self):
+        engine = Speaker("Hey, undo that.")
+        engine.memory = Mock(**{"vocabulary.return_value": []})
+        event = self.run_request(engine, previous_output="Sent.")
+        self.assertEqual((event["mode"], event["text"]), ("undo", ""))
+        self.assertEqual((engine.cleaned, engine.edits), ([], []))
+        engine.memory.remember.assert_not_called()
+        engine = Speaker("Hey, undo that.")
+        engine.smart_formatting = False
+        self.assertNotIn("mode", self.run_request(engine, smart_formatting=False))
+
+    def test_whisper_translation_that_reads_as_english_is_only_tidied(self):
+        engine = Speaker("I will reach the office by six.")
+        event = self.run_request(engine, task="translate", language="en")
+        self.assertEqual(engine.languages, ["auto"])
+        self.assertEqual((engine.cleaned, engine.translations), (["I will reach the office by six."], []))
+        self.assertEqual(event["text"], "I will reach the office by six.")
+
+    def test_untranslated_speech_goes_to_the_cleanup_model(self):
+        for said in ["मैं छह बजे तक ऑफिस पहुंच जाऊंगा।", "Quiero llegar a la oficina mañana temprano con mi hermano."]:
+            engine = Speaker(said, translated="I will reach the office by six.")
+            event = self.run_request(engine, task="translate", language="hi")
+            self.assertEqual(engine.languages, ["hi"])
+            self.assertEqual(engine.translations, [said])
+            self.assertEqual(event["text"], "I will reach the office by six.")
+
+    def test_translation_skips_spoken_commands_and_snippets(self):
+        engine = Speaker("Hey, undo that.")
+        event = self.run_request(engine, task="translate", snippets=[CALENDLY])
+        self.assertNotIn("mode", event)
+
+    def test_whisper_is_asked_to_translate(self):
+        engine = worker.Engine(memory=False)
+        engine.stt = Mock()
+        engine.stt.transcribe.return_value = {"language": "hi", "segments": [{"text": "I am coming."}]}
+        engine.task = "translate"
+        with patch.object(engine, "whisper_single_window", return_value=(None, "hi")):
+            self.assertEqual(engine.transcribe(object(), "hi"), "I am coming.")
+        self.assertEqual(engine.stt.transcribe.call_args.kwargs["task"], "translate")
+        self.assertTrue(worker.looks_english("Can you send me the file by tomorrow?"))
+        self.assertFalse(worker.looks_english("Je veux aller au magasin demain matin."))
+
+    def test_cleanup_model_translation_returns_only_the_english(self):
+        engine = worker.Engine(memory=False)
+        engine.llm = Mock()
+        engine.tokenizer = Mock()
+        engine.tokenizer.encode.return_value = [1, 2, 3]
+
+        def answer(*args, **kwargs):
+            yield SimpleNamespace(text="<dictation>I will come tomorrow.</dictation>", finish_reason="stop")
+
+        modules = {"mlx_lm": SimpleNamespace(stream_generate=answer), "mlx_lm.sample_utils": SimpleNamespace(make_sampler=Mock())}
+        with patch.dict(sys.modules, modules):
+            self.assertEqual(engine.translate("मैं कल आऊंगा।"), ("I will come tomorrow.", None))
+        engine.llm = None
+        self.assertEqual(engine.translate("मैं कल आऊंगा।")[0], "मैं कल आऊंगा।")
 
 if __name__ == "__main__":
     unittest.main()

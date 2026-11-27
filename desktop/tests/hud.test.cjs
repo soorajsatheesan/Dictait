@@ -171,3 +171,30 @@ test('destroy removes IPC listeners and rejects pending recorder requests', asyn
   assert.equal(await pending, 'Destroyed.')
   assert.equal(f.ipcMain.listenerCount('hud:ready'), 0)
 })
+
+test('a translation names its own shortcut and says it is translating', (t) => {
+  const f = fixture(t)
+  f.model.stored = { shortcuts: {
+    dictate: { kind: 'chord', code: 49, modifiers: ['control'] }, translate: { kind: 'chord', code: 49, modifiers: ['control', 'shift'] },
+    pasteLast: { kind: 'chord', code: 9, modifiers: ['control', 'option'] }
+  } }
+  f.model.live.translating = true
+  f.hud.update()
+  const state = f.sent.filter(([channel]) => channel === 'hud').at(-1)[1]
+  assert.equal(state.translating, true)
+  assert.equal(state.shortcut, '⌃ ⇧ Space')
+  f.model.state.phase = 'cleaning'; f.hud.update()
+  f.advance(1200)
+  assert.equal(f.hud.content().title, 'Translating to English')
+})
+
+test('undo results read plainly in the island', (t) => {
+  const f = fixture(t)
+  f.model.state.phase = 'ready'
+  f.model.state.message = 'Removed your last dictation.'
+  assert.deepEqual({ ...f.hud.content() }, { kind: 'done', title: 'Removed your last dictation', detail: '' })
+  f.model.state.message = 'Your last dictation was edited since, so Dictait left it as it is.'
+  assert.equal(f.hud.content().title, 'Nothing removed')
+  f.model.state.message = 'Nothing to undo. Dictait can remove only the text it just pasted.'
+  assert.equal(f.hud.content().detail, 'Dictait can remove only the text it just pasted.')
+})

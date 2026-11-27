@@ -31,7 +31,8 @@ export class RecordingHUD implements RecorderBridge {
   private custom: { kind: HudKind; title: string; detail: string } | null = null
   private state: HudState = {
     visible: false, kind: 'info', title: '', detail: '', startedAt: null, screen: { hasNotch: false, notchWidth: 0, notchHeight: 0 },
-    live: '', note: '', holding: false, holdStartedAt: null, editing: false, destination: null, microphone: '', micQuiet: false, shortcut: '⌃ Space'
+    live: '', note: '', holding: false, holdStartedAt: null, editing: false, translating: false, destination: null, microphone: '', micQuiet: false,
+    shortcut: '⌃ Space'
   }
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; requestId: number }>()
   private cleanups: (() => void)[] = []
@@ -164,17 +165,21 @@ export class RecordingHUD implements RecorderBridge {
     const pasteLast = shortcutKeys(this.shortcuts.pasteLast).join('')
     const { phase, message } = this.model.state
     switch (phase) {
-      case 'recording': return { kind: 'recording', title: this.model.live.editing ? 'Editing selection' : 'Listening', detail: '' }
+      case 'recording': return { kind: 'recording', title: this.model.live.editing ? 'Editing selection' : this.model.live.translating ? 'Translating' : 'Listening', detail: '' }
       case 'requestingMicrophone': return { kind: 'microphone', title: 'Allow microphone', detail: 'Choose Allow in the prompt' }
       case 'transcribing': case 'cleaning': {
         const elapsed = Math.floor((Date.now() - (this.processingAt ?? Date.now())) / 1000)
-        return { kind: 'transcribing', title: elapsed < 1 ? 'Finishing your dictation' : phase === 'cleaning'
-          ? this.model.live.editing ? 'Rewriting your selection' : 'Polishing your words' : 'Turning speech into text',
+        return { kind: 'transcribing', title: elapsed < 1 ? 'Finishing your dictation' : this.model.live.translating ? 'Translating to English'
+          : phase === 'cleaning' ? this.model.live.editing ? 'Rewriting your selection' : 'Polishing your words' : 'Turning speech into text',
           detail: elapsed >= 8 ? `Still working on this Mac · ${elapsed}s` : 'On this Mac' }
       }
       case 'preparing': return { kind: 'preparing', title: 'Warming up', detail: 'Loading local models' }
       case 'failed': return { kind: 'failed', title: 'Needs attention', detail: message }
       case 'ready':
+        if (message.startsWith('Removed your last dictation')) return { kind: 'done', title: 'Removed your last dictation', detail: '' }
+        if (/^(Nothing to undo|Your last dictation (was edited|isn’t)|Couldn’t remove your last)/.test(message)) {
+          return { kind: 'info', title: 'Nothing removed', detail: message.replace(/^Nothing to undo\.\s*/, '') }
+        }
         if (/^(Pasted[., ]|Replaced\.|Updated your last dictation\.)/.test(message)) {
           const app = this.model.live.deliveredTo?.appName
           return { kind: 'done', title: app ? `${message.startsWith('Replaced') || message.startsWith('Updated') ? 'Rewritten in' : 'Pasted into'} ${app}` : 'Paste sent',
@@ -262,9 +267,10 @@ export class RecordingHUD implements RecorderBridge {
     if (this.processingAt !== null && Date.now() - this.processingAt < 180 && this.visible) return
     const content = this.content()
     const { live, note, holding, holdStartedAt, editing, microphone, micQuiet, destination, deliveredTo } = this.model.live
+    const translating = this.model.live.translating === true
     this.state = { ...this.state, ...content, visible: this.visible, startedAt: this.model.state.recordingStartedAt, live, note, holding, holdStartedAt, editing,
-      microphone, micQuiet, destination: this.model.state.phase === 'ready' ? deliveredTo : destination,
-      shortcut: shortcutKeys(this.shortcuts.dictate).join(' ') }
+      translating, microphone, micQuiet, destination: this.model.state.phase === 'ready' ? deliveredTo : destination,
+      shortcut: shortcutKeys(this.shortcuts[translating ? 'translate' : 'dictate']).join(' ') }
     this.window.webContents.send('hud', this.state)
   }
 

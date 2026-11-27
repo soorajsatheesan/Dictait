@@ -168,7 +168,7 @@ function TryIt({ keys, tried, transcript, ready, onPractice }: { keys: string[];
       lede={tried ? <>Dictait wrote “{transcript.slice(0, 90)}{transcript.length > 90 ? '…' : ''}”. The same shortcut works in every app.</>
         : <>Press <Keys keys={keys} small />, say a sentence, then press it again. Your words land in the box below.</>}>
       <Panel className="try-panel">
-        <textarea ref={field} className="try-field" placeholder={ready ? 'Your dictation appears here…' : 'Waiting for the voice model…'} spellCheck={false} />
+        <textarea ref={field} className="try-field" data-practice="true" placeholder={ready ? 'Your dictation appears here…' : 'Waiting for the voice model…'} spellCheck={false} />
       </Panel>
       <button type="button" className="setup-link" onClick={onPractice}>Practise with guided lessons instead</button>
     </Page>

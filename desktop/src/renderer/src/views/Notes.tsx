@@ -1,9 +1,9 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, Waypoints } from 'lucide-react'
-import type { ArchivedNote } from '@shared/types'
-import { EmptyState, Highlight, Keys, TermChip } from '../components/ui'
-import { dayLabel, groupByDay, languageName, longDate, spoken, timeLabel, wordCount } from '../lib/format'
+import type { ArchivedNote, RecoveredRecording } from '@shared/types'
+import { EmptyState, Highlight, Keys, TermChip, useToast } from '../components/ui'
+import { clock, dayLabel, groupByDay, languageName, longDate, spoken, timeLabel, wordCount } from '../lib/format'
 import { kindOf } from '../lib/kinds'
 import { smooth, snappy } from '../lib/motion'
 import { api, type ArchiveModel } from '../lib/store'
@@ -14,11 +14,15 @@ function filterNotes(notes: ArchivedNote[], search: string): ArchivedNote[] {
   return query ? notes.filter((note) => note.body.toLocaleLowerCase().includes(query)) : notes
 }
 
-export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onShowInGraph, shortcut }: {
+export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onShowInGraph, shortcut, retryKeys, recovered }: {
   archive: ArchiveModel; search: string; selected: string | null; onSelect: (id: string) => void
   onOpenTerm: (id: number) => void; onShowInGraph: (id: string) => void
   /** The dictation shortcut as keycaps. */
   shortcut: string[]
+  /** The retry shortcut as keycaps. */
+  retryKeys: string[]
+  /** Failed dictations whose audio is kept for a retry. */
+  recovered: RecoveredRecording[]
 }) {
   const notes = useMemo(() => filterNotes(archive.notes, search), [archive.notes, search])
   const groups = useMemo(() => groupByDay(notes), [notes])
@@ -43,13 +47,17 @@ export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onS
 
   if (archive.loaded && archive.notes.length === 0) {
     return (
-      <EmptyState title="No dictations yet" detail={<>Click into any text box, press <Keys keys={shortcut} small /> and talk. Press it again to finish. Everything you dictate is kept here.</>} />
+      <div className="notes-empty scroll-area">
+        {recovered.length > 0 && <Recovered recordings={recovered} retryKeys={retryKeys} />}
+        <EmptyState title="No dictations yet" detail={<>Click into any text box, press <Keys keys={shortcut} small /> and talk. Press it again to finish. Everything you dictate is kept here.</>} />
+      </div>
     )
   }
 
   return (
     <div className="notes">
       <motion.div className="note-list" ref={list} layoutScroll role="listbox" aria-label="Dictations">
+        {recovered.length > 0 && !search.trim() && <Recovered recordings={recovered} retryKeys={retryKeys} />}
         {groups.map((group) => (
           <section key={group.key} className="note-group">
             <h3 className="eyebrow note-group-label">{group.label}</h3>
@@ -74,6 +82,32 @@ export function NotesView({ archive, search, selected, onSelect, onOpenTerm, onS
         </AnimatePresence>
       </div>
     </div>
+  )
+}
+
+/** Dictations that failed, with their audio kept so they can be transcribed again. */
+function Recovered({ recordings, retryKeys }: { recordings: RecoveredRecording[]; retryKeys: string[] }) {
+  const toast = useToast()
+  const retry = async (id: string) => { toast((await api.retryRecording(id)).feedback) }
+  const remove = async (id: string) => { toast((await api.deleteRecording(id)).feedback) }
+  return (
+    <section className="note-group recovered" aria-label="Recovered recordings">
+      <h3 className="eyebrow note-group-label">Recovered recordings</h3>
+      {recordings.map((recording) => (
+        <div key={recording.id} className="recovered-row">
+          <span className="note-row-meta">
+            <span>{dayLabel(recording.at)} · {timeLabel(recording.at)}</span>
+            <span>{clock(recording.seconds)}{recording.translate ? ' · translation' : ''}</span>
+          </span>
+          <span className="recovered-reason">{recording.reason}</span>
+          <span className="recovered-actions">
+            <button type="button" className="btn secondary" onClick={() => void retry(recording.id)}>Retry</button>
+            <button type="button" className="btn ghost" onClick={() => void remove(recording.id)}>Delete</button>
+          </span>
+        </div>
+      ))}
+      <p className="recovered-note">Kept on this Mac for 7 days. Retry here to copy the words, or press <Keys keys={retryKeys} small /> in any app to paste the newest one there.</p>
+    </section>
   )
 }
 

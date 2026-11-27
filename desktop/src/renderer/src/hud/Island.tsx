@@ -115,7 +115,7 @@ export function Island() {
   )
 }
 
-type Line = { kind: 'holding' | 'holdPending' | 'quiet' | 'editing' | 'live' | 'note' | 'hint' | 'destination'; text?: string }
+type Line = { kind: 'holding' | 'holdPending' | 'quiet' | 'translating' | 'editing' | 'live' | 'note' | 'hint' | 'destination'; text?: string }
 
 /** The one line under the waveform, by priority. */
 function subline(hud: HudState, early: boolean): Line {
@@ -123,6 +123,8 @@ function subline(hud: HudState, early: boolean): Line {
   if (hud.holdStartedAt !== null) return { kind: 'holdPending' }
   if (hud.micQuiet) return { kind: 'quiet' }
   if (hud.live) return { kind: 'live', text: hud.live }
+  // Translating is a mode for the whole recording, so it keeps the line until words arrive.
+  if (hud.translating) return { kind: 'translating' }
   if (hud.editing && early) return { kind: 'editing' }
   if (early && hud.note) return { kind: 'note', text: hud.note }
   if (early) return { kind: 'hint' }
@@ -159,6 +161,7 @@ function LineContent({ hud, line }: { hud: HudState; line: Line }) {
     case 'quiet': return <span className="ellipsis">Can’t hear you · {hud.microphone || 'check your microphone'}</span>
     case 'live': return <LiveText text={line.text!} />
     case 'editing': return <>Editing selection · <kbd>{hud.shortcut}</kbd> to finish</>
+    case 'translating': return <>Translating to English · <kbd>{hud.shortcut}</kbd> to finish</>
     case 'note': return <span className="ellipsis">{line.text}</span>
     case 'hint': return <><kbd>{hud.shortcut}</kbd> finish <kbd>esc</kbd> cancel</>
     case 'destination': return <Destination hud={hud} />

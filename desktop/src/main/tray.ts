@@ -83,6 +83,10 @@ export class StatusMenu {
       }
     )
     if (state.phase === 'recording') items.push({ label: 'Cancel recording', click: () => model.cancelRecording() })
+    if (state.recovered?.length) {
+      items.push({ label: 'Retry last failed dictation', ...accelerator(shortcutAccelerator(shortcuts.retryLast)),
+        enabled: editable, click: () => void model.retryFromShortcut() })
+    }
     if (state.phase === 'failed') items.push({ label: 'Retry models', click: () => model.reloadModels() })
     if (!state.microphoneAllowed) items.push({ label: 'Allow microphone…', click: () => model.requestMicrophone() })
     if (settings.autoPaste && !state.accessibilityAllowed) items.push({ label: 'Allow automatic paste…', click: () => model.requestAccessibility() })

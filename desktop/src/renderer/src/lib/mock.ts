@@ -1,6 +1,7 @@
 // A simulated bridge for design previews: synthetic notes, no microphone, no models.
 import { ACTION_NAMES, checkShortcut, DEFAULT_SHORTCUTS, sameShortcut, shortcutKeys, shortcutName, type ShortcutAction } from '@shared/shortcuts'
-import type { AppState, Archive, ArchivedLink, ArchivedNote, ArchivedTerm, DictaitAPI, HudKind, HudState, Section, Suggestion, VocabularyEntry } from '@shared/types'
+import { SNIPPET_CHARS, SNIPPET_LIMIT, type AppState, type Archive, type ArchivedLink, type ArchivedNote, type ArchivedTerm, type DictaitAPI, type HudKind, type HudState,
+  type RecoveredRecording, type Section, type Snippet, type Suggestion, type VocabularyEntry } from '@shared/types'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -51,6 +52,14 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
     { id: 'v1', word: 'Dictait', alias: 'dictate' }, { id: 'v2', word: 'Qwen', alias: 'queen' }, { id: 'v3', word: 'MLX', alias: 'M L X' },
     { id: 'v4', word: 'Northwind', alias: '' }, { id: 'v5', word: 'Arjun', alias: 'Arjen' }, { id: 'v6', word: 'Parakeet', alias: '' }
   ]
+  let snippets: Snippet[] = [
+    { id: 's1', trigger: 'my calendly', content: 'https://calendly.com/maya-rao/30min' },
+    { id: 's2', trigger: 'standup template', content: 'Yesterday:\n- \nToday:\n- \nBlockers:\n- ' },
+    { id: 's3', trigger: 'signature', content: 'Best,\nMaya Rao\nNorthwind · maya@northwind.dev' }
+  ]
+  let recovered: RecoveredRecording[] = [
+    { id: 'r1', at: Date.now() - 25 * 60_000, seconds: 132, reason: 'Transcription took too long', translate: false }
+  ]
   // Previews: ?section=setup shows a fresh install mid-download; ?section=settings offers an update.
   const fresh = new URLSearchParams(location.search).get('section') === 'setup'
   const state: AppState = {
@@ -70,11 +79,11 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
         docs: 'Well structured. Use paragraphs, or a list when the content is a list.'
       }
     },
-    vocabulary,
+    vocabulary, snippets, recovered,
     history: [{ text: 'Discuss Dictait with Maya tomorrow.', at: Date.now() - 600_000, app: 'Slack' }],
     download: fresh ? { model: 'speech model', done: 1_120_000_000, total: 3_250_000_000 } : null,
-    version: '0.6.7', correction: null, microphoneName: 'MacBook Air Microphone', micTestActive: false, practiceCompleted: [],
-    update: { phase: 'available', version: '0.5.1', notes: 'Faster cleanup and a new island.', progress: 0, error: '', checkedAt: Date.now() - 60_000 }
+    version: '0.7.0', correction: null, microphoneName: 'MacBook Air Microphone', micTestActive: false, practiceCompleted: [],
+    update: { phase: 'available', version: '0.7.1', notes: 'Faster cleanup and a new island.', progress: 0, error: '', checkedAt: Date.now() - 60_000 }
   }
   let suggestions: Suggestion[] = [
     { word: 'Lisbon', alias: 'lisbin', reason: 'From your correction' }, { word: 'Onboarding', alias: '', reason: 'Said 3 times' },
@@ -197,6 +206,42 @@ export function createMock(real?: DictaitAPI): DictaitAPI {
       emit({ vocabulary })
       return { ok: true, feedback: `Restored “${entry.word}”.` }
     },
+    saveSnippet: async (trigger, content, replaceId) => {
+      const clean = trigger.trim().replace(/\s+/g, ' ')
+      if (!clean) return { ok: false, feedback: 'Type the words you’ll say.' }
+      if (!content.trim()) return { ok: false, feedback: 'Type the text Dictait should paste.' }
+      if (content.length > SNIPPET_CHARS) return { ok: false, feedback: `Keep a snippet under ${SNIPPET_CHARS.toLocaleString('en-US')} characters.` }
+      const key = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+      const existing = snippets.find((entry) => entry.id === replaceId) ?? snippets.find((entry) => key(entry.trigger) === key(clean))
+      if (!existing && snippets.length >= SNIPPET_LIMIT) return { ok: false, feedback: `Dictait keeps up to ${SNIPPET_LIMIT} snippets.` }
+      snippets = existing ? snippets.map((entry) => (entry === existing ? { ...entry, trigger: clean, content } : entry))
+        : [...snippets, { id: `s${Date.now()}`, trigger: clean, content }]
+      emit({ snippets })
+      return { ok: true, feedback: existing ? `Updated “${clean}”.` : `Added “${clean}”. Say it in your next dictation.` }
+    },
+    removeSnippet: async (id) => {
+      const entry = snippets.find((item) => item.id === id)
+      snippets = snippets.filter((item) => item.id !== id)
+      emit({ snippets })
+      return { ok: true, feedback: entry ? `Removed “${entry.trigger}”.` : 'Snippet removed.' }
+    },
+    restoreSnippet: async (entry, index) => {
+      snippets = [...snippets.slice(0, index), entry, ...snippets.slice(index)]
+      emit({ snippets })
+      return { ok: true, feedback: `Restored “${entry.trigger}”.` }
+    },
+    retryRecording: async (id) => {
+      if (state.phase !== 'ready') return { ok: false, feedback: 'Finish the current dictation first, then retry.' }
+      recovered = recovered.filter((item) => item.id !== id)
+      emit({ recovered })
+      finish()
+      return { ok: true, feedback: 'Retrying your saved recording.' }
+    },
+    deleteRecording: async (id) => {
+      recovered = recovered.filter((item) => item.id !== id)
+      emit({ recovered })
+      return { ok: true, feedback: 'Recording deleted.' }
+    },
     openFolder: () => {},
     microphones: async () => [{ name: 'MacBook Air Microphone', transport: 'builtin', default: false }, { name: 'AirPods Pro', transport: 'bluetooth', default: true }],
     suggestions: async () => suggestions.filter((item) => !vocabulary.some((entry) => entry.word.toLowerCase() === item.word.toLowerCase())),
@@ -224,10 +269,11 @@ function demoHud(callback: (state: HudState) => void): () => void {
     const copy = pinned === 'copied' ? ['Copied · ready to paste', `Focus a text box, then ⌘V · ${shortcutKeys(DEFAULT_SHORTCUTS.pasteLast).join('')} repeats the last dictation`] : step?.slice(1, 3)
     const timer = window.setTimeout(() => callback({
       visible: true, kind: pinned, title: String(copy?.[0] ?? 'Needs attention'), detail: String(copy?.[1] ?? 'The model worker stopped. Click Retry to reload models.'),
-      startedAt: Date.now() - 12_000, screen, live: pinned === 'recording' ? 'so the plan is to ship the preview build on Friday and then' : '', note: '',
+      startedAt: Date.now() - 12_000, screen, live: pinned === 'recording' && params.get('mode') !== 'translate' ? 'so the plan is to ship the preview build on Friday and then' : '', note: '',
       holding: params.get('mode') === 'hold', holdStartedAt: params.get('mode') === 'pending' ? Date.now() : null, editing: false,
+      translating: params.get('mode') === 'translate',
       destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: params.get('quiet') === '1',
-      shortcut: shortcutKeys(DEFAULT_SHORTCUTS.dictate).join(' ')
+      shortcut: shortcutKeys(DEFAULT_SHORTCUTS[params.get('mode') === 'translate' ? 'translate' : 'dictate']).join(' ')
     }), 300)
     return () => window.clearTimeout(timer)
   }
@@ -238,7 +284,7 @@ function demoHud(callback: (state: HudState) => void): () => void {
     const [kind, title, detail, duration] = steps[index % steps.length]
     index++
     if (kind) last = kind
-    callback({ visible: kind !== null, kind: kind ?? last, title, detail, startedAt: kind === 'recording' ? Date.now() : null, screen, live: '', note: '', holding: false, holdStartedAt: null, editing: false,
+    callback({ visible: kind !== null, kind: kind ?? last, title, detail, startedAt: kind === 'recording' ? Date.now() : null, screen, live: '', note: '', holding: false, holdStartedAt: null, editing: false, translating: false,
       destination: { app: 'com.t3tools.t3code', appName: 'T3 Code', icon: '', editable: true }, microphone: 'MacBook Air Microphone', micQuiet: false,
       shortcut: shortcutKeys(DEFAULT_SHORTCUTS.dictate).join(' ') })
     timer = window.setTimeout(next, duration)

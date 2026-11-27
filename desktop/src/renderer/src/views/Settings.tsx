@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
-import { DEFAULT_SHORTCUTS, sameShortcut, shortcutKeys, shortcutName, type Shortcut } from '@shared/shortcuts'
+import { DEFAULT_SHORTCUTS, sameShortcut, shortcutKeys, shortcutName, type Shortcut, type ShortcutAction } from '@shared/shortcuts'
 import type { AppState, MediaMode, Microphone, Settings, Tones } from '@shared/types'
 import { Keys, Segmented, Switch, useToast } from '../components/ui'
 import { ShortcutField } from '../components/ShortcutField'
@@ -22,8 +22,16 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
 
         <Group title="Dictation">
           <DictateShortcutRow state={state} />
+          <ChordRow title="Speak to translate" action="translate" value={settings.shortcuts.translate}
+            detail="Speak in any language and Dictait pastes it in English. Tap to start and finish, or hold to talk." />
           <ChordRow title="Paste last dictation" action="pasteLast" value={settings.shortcuts.pasteLast}
             detail="Puts your latest dictation at the cursor again. Recent ones are in the menu bar too." />
+          <ChordRow title="Undo last dictation" action="undoLast" value={settings.shortcuts.undoLast}
+            detail="Removes the text Dictait just pasted, as long as you haven’t changed it. Saying “hey, undo that” does the same." />
+          <ChordRow title="Retry a failed dictation" action="retryLast" value={settings.shortcuts.retryLast}
+            detail={state.recovered.length
+              ? `Transcribes the newest saved recording again and pastes it at your cursor. ${state.recovered.length} saved; they’re listed in Notes.`
+              : 'If a dictation fails, its recording is kept for 7 days. This transcribes it again and pastes it at your cursor.'} />
           <ChordRow title="Review a correction" action="learnCorrection" value={settings.shortcuts.learnCorrection}
             detail={state.correctionShortcutRegistered ? 'Select your corrected dictation in any app and press this to review and save it.'
               : `${shortcutName(settings.shortcuts.learnCorrection)} is in use by another app. Choose a different one.`} />
@@ -91,6 +99,10 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
               ['“Summarize this”', 'Keeps names, numbers and facts'],
               ['“Format this as an email”', 'Uses only what you said'],
               ['“Make this shorter” · “more formal”', 'Also “friendlier”; at the start or end'],
+              ['“Hey, bullet points” · “Hey, summarize that”', 'Mid-dictation: applies to what you said before it, and is never typed'],
+              ['“Hey, make that shorter”', 'On its own, within 2 minutes: rewrites your last dictation in place'],
+              ['“Hey, undo that”', 'Removes your last dictation if you haven’t edited it'],
+              ['“Insert my calendly”', 'Pastes one of your snippets exactly as saved'],
             ].map(([phrase, effect]) => (
               <div key={phrase} className="command"><span className="command-phrase">{phrase}</span><span className="command-effect">{effect}</span></div>
             ))}
@@ -127,7 +139,7 @@ export function SettingsView({ state, onPractice }: { state: AppState; onPractic
           </Row>
         </Group>
 
-        <p className="settings-foot faint">Dictait runs entirely on this Mac. Audio is deleted after transcription. No account, no cloud, no telemetry.</p>
+        <p className="settings-foot faint">Dictait runs entirely on this Mac. Audio is deleted once your words arrive; if a dictation fails, its audio stays on this Mac for up to 7 days so you can retry it. No account, no cloud, no telemetry.</p>
       </div>
     </div>
   )
@@ -196,7 +208,7 @@ function DictateShortcutRow({ state }: { state: AppState }) {
   )
 }
 
-function ChordRow({ title, action, value, detail }: { title: string; action: 'pasteLast' | 'learnCorrection'; value: Shortcut; detail: string }) {
+function ChordRow({ title, action, value, detail }: { title: string; action: Exclude<ShortcutAction, 'dictate'>; value: Shortcut; detail: string }) {
   const [error, setError] = useState('')
   return (
     <Row title={title} detail={error ? <span className="row-error">{error}</span> : detail}>

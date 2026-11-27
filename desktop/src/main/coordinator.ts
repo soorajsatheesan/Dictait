@@ -2,21 +2,24 @@ import { app, clipboard, globalShortcut, shell, systemPreferences } from 'electr
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, type AppState, type HistoryEntry, type Microphone, type Phase, type RecorderOptions,
-  type CorrectionDraft, type Destination, type Settings, type Suggestion, type Tones, type UpdateStatus, type VocabularyEntry, type WordResult
+  HOLD_TO_TALK_MS, MAX_DICTATION_SECONDS, SNIPPET_CHARS, SNIPPET_LIMIT, TRIGGER_CHARS, type AppState, type HistoryEntry, type Microphone,
+  type Phase, type RecorderOptions, type CorrectionDraft, type Destination, type Settings, type Snippet, type Suggestion, type Tones,
+  type UpdateStatus, type VocabularyEntry, type WordResult
 } from '@shared/types'
 import {
-  ACTION_NAMES, checkShortcut, DEFAULT_SHORTCUTS, sameShortcut, shortcutAccelerator, shortcutName,
+  ACTION_NAMES, checkShortcut, DEFAULT_SHORTCUTS, sameShortcut, shortcutAccelerator, shortcutKeys, shortcutName,
   type ShortcutAction, type Shortcuts
 } from '@shared/shortcuts'
 import { readArchive } from './archive'
-import { NativeHelper, type FocusInfo, type HotKeySpec, type MediaHold } from './helper'
+import { NativeHelper, type FocusInfo, type HotKeySpec, type MediaHold, type Replacement } from './helper'
 import { loadPersonal, newID, savePersonal, type Personalization } from './personal'
 import { SUPPORT } from './paths'
+import {
+  audioSeconds, deleteRecording, keepRecording, listRecordings, recordingFiles, recoverInterrupted, removeFiles, writePending
+} from './recovery'
 import { loadSettings, saveSettings, type Stored } from './settings'
 import { ModelWorker, type WorkerEvent } from './worker'
 
@@ -34,6 +37,8 @@ export interface LiveState {
   holding: boolean
   holdStartedAt: number | null
   editing: boolean
+  /** Recording with the translate shortcut. */
+  translating: boolean
   appName: string
   destination: Destination | null
   deliveredTo: Destination | null
@@ -96,7 +101,7 @@ export class Coordinator extends EventEmitter {
   stored: Stored = loadSettings()
   personal: Personalization = loadPersonal()
   state: AppState
-  readonly live: LiveState = { live: '', note: '', holding: false, holdStartedAt: null, editing: false, appName: '',
+  readonly live: LiveState = { live: '', note: '', holding: false, holdStartedAt: null, editing: false, translating: false, appName: '',
     destination: null, deliveredTo: null, microphone: '', micQuiet: false }
   recorder: RecorderBridge | null = null
   onToggleRequested: () => void = () => {}
@@ -108,7 +113,19 @@ export class Coordinator extends EventEmitter {
   readonly helper = new NativeHelper()
   private worker = new ModelWorker()
   private requestID: string | null = null
-  private pendingAudio: string | null = null
+  /** The current dictation's audio, in the order it was spoken. Deleted once its words are delivered. */
+  private audioFiles: string[] = []
+  private audioID: string | null = null
+  private audioBytes = 0
+  private audioStartedAt = 0
+  /** A piece of the current dictation could not be transcribed, so its audio is kept even on success. */
+  private pieceFailed = false
+  /** The current recording (or retry) pastes English, whatever language was spoken. */
+  private translating = false
+  /** The kept recording being transcribed again. */
+  private retrying: string | null = null
+  /** A retry waiting for the models to reload. */
+  private queuedRetry: string | null = null
   private watchdog: NodeJS.Timeout | null = null
   private ticker: NodeJS.Timeout | null = null
   private cleanupAvailable = false
@@ -118,7 +135,6 @@ export class Coordinator extends EventEmitter {
   /** The worker session for the current recording; long dictations send pieces under it. */
   private session: string | null = null
   private pieces = 0
-  private pieceFiles = new Set<string>()
   /** Recording-time context, selection and tone; delivery always uses the current focus. */
   private target: FocusInfo | null = null
   private targetReady: Promise<void> = Promise.resolve()
@@ -153,7 +169,8 @@ export class Coordinator extends EventEmitter {
       transcript: '', timing: '', detectedLanguage: this.stored.detectedLanguage,
       microphoneAllowed: false, accessibilityAllowed: false, shortcutRegistered: false, correctionShortcutRegistered: false,
       launchAtLogin: false, loginNeedsApproval: false, rememberedTerms: 0,
-      settings: this.settings, vocabulary: this.personal.vocabulary, history: [], download: null, version: app.getVersion(),
+      settings: this.settings, vocabulary: this.personal.vocabulary, snippets: this.personal.snippets, recovered: [],
+      history: [], download: null, version: app.getVersion(),
       update: { phase: 'idle', version: '', notes: '', progress: 0, error: '', checkedAt: null },
       correction: null, microphoneName: '', micTestActive: false, practiceCompleted: []
     }
@@ -169,6 +186,11 @@ export class Coordinator extends EventEmitter {
   /** “Control–Space”, “Right Command”: the dictation shortcut, for messages. */
   get shortcutName(): string {
     return shortcutName(this.stored.shortcuts.dictate)
+  }
+
+  /** The shortcut that finishes the current recording. */
+  private get finishName(): string {
+    return shortcutName(this.stored.shortcuts[this.translating ? 'translate' : 'dictate'])
   }
 
   start(): void {
@@ -190,6 +212,8 @@ export class Coordinator extends EventEmitter {
       if (this.state.launchAtLogin || this.state.loginNeedsApproval) this.store({ configuredLogin: true })
     }
     this.worker.onEvent = (event) => this.handle(event)
+    recoverInterrupted()
+    this.refreshRecovered()
     this.reloadModels()
   }
 
@@ -260,7 +284,9 @@ export class Coordinator extends EventEmitter {
     // If the native helper is unavailable (no answer for a shortcut), register Electron fallbacks.
     // A shortcut the helper could not register is taken, and Electron would fail the same way.
     const run: Record<ShortcutAction, () => void> = {
-      dictate: () => this.toggleRecording(), pasteLast: () => void this.pasteLast(), learnCorrection: () => void this.previewCorrection(null, true)
+      dictate: () => this.toggleRecording(), translate: () => this.toggleRecording(false, null, true),
+      pasteLast: () => void this.pasteLast(), undoLast: () => void this.undoLast(true), retryLast: () => void this.retryFromShortcut(),
+      learnCorrection: () => void this.previewCorrection(null, true)
     }
     for (const action of Object.keys(run) as ShortcutAction[]) {
       const accelerator = shortcutAccelerator(shortcuts[action])
@@ -298,7 +324,7 @@ export class Coordinator extends EventEmitter {
 
   /** Change one shortcut. One that macOS or another app already owns is refused, keeping the old one. */
   async setShortcut(action: ShortcutAction, value: unknown): Promise<WordResult> {
-    if (!(action in DEFAULT_SHORTCUTS)) return { ok: false, feedback: 'Unknown shortcut.' }
+    if (!Object.hasOwn(DEFAULT_SHORTCUTS, action)) return { ok: false, feedback: 'Unknown shortcut.' }
     const checked = checkShortcut(value, action === 'dictate')
     if ('error' in checked) return { ok: false, feedback: checked.error }
     const { shortcut } = checked
@@ -354,8 +380,10 @@ export class Coordinator extends EventEmitter {
   /** Tap to start, tap to finish; or hold while talking and let go to finish. */
   private hotkey(name: string, down: boolean, focus: FocusInfo | null = null, at = Date.now()): void {
     if (name === 'pasteLast') { if (down) void this.pasteLast(); return }
+    if (name === 'undoLast') { if (down) void this.undoLast(true); return }
+    if (name === 'retryLast') { if (down) void this.retryFromShortcut(); return }
     if (name === 'learnCorrection') { if (down) void this.previewCorrection(focus, true); return }
-    if (name !== 'dictate') return
+    if (name !== 'dictate' && name !== 'translate') return
     if (down) {
       // Ignore key auto-repeat until release; recover if a missed key-up left pressedAt stale while idle.
       if (this.pressedAt && !(this.state.phase === 'ready' && at - this.pressedAt > 15_000)) return
@@ -365,7 +393,7 @@ export class Coordinator extends EventEmitter {
       if (this.state.phase === 'recording') { void this.stopRecording(); return }
       if (this.state.phase !== 'ready') return
       this.pressStarted = true
-      this.toggleRecording(true, focus)
+      this.toggleRecording(true, focus, name === 'translate')
       this.setLive({ holdStartedAt: this.pressedAt })
       if (this.holdTimer) clearTimeout(this.holdTimer)
       this.holdTimer = setTimeout(() => {
@@ -394,8 +422,8 @@ export class Coordinator extends EventEmitter {
     }
   }
 
-  /** From the menu, the window or the shortcut. `fromHotkey` skips the repeat guard (the helper debounces). */
-  toggleRecording(fromHotkey = false, focus: FocusInfo | null = null): void {
+  /** From the menu, the window or a shortcut. `fromHotkey` skips the repeat guard (the helper debounces). */
+  toggleRecording(fromHotkey = false, focus: FocusInfo | null = null, translate = false): void {
     // Key auto-repeat and double clicks must not start and stop in the same breath.
     const now = Date.now()
     if (!fromHotkey && now - this.lastToggle < 250) return
@@ -404,20 +432,20 @@ export class Coordinator extends EventEmitter {
     if (this.state.phase === 'recording') { void this.stopRecording(); return }
     if (this.state.phase !== 'ready') return
     this.personal = loadPersonal()
-    this.update({ notice: '', vocabulary: this.personal.vocabulary })
+    this.update({ notice: '', vocabulary: this.personal.vocabulary, snippets: this.personal.snippets })
     this.refreshPermissions()
     const status = systemPreferences.getMediaAccessStatus('microphone')
     if (status === 'not-determined') {
       this.setPhase('requestingMicrophone', 'Choose Allow in the microphone prompt, then speak.')
       void systemPreferences.askForMediaAccess('microphone').then((granted) => {
         this.update({ microphoneAllowed: granted })
-        if (granted) void this.beginRecording(focus)
+        if (granted) void this.beginRecording(focus, translate)
         else this.setPhase('ready', 'Enable Dictait in System Settings → Privacy & Security → Microphone.')
       }).catch(() => {
         this.setPhase('ready', 'Could not request microphone permission. Allow Dictait in Privacy & Security → Microphone.')
       })
     } else if (status === 'granted') {
-      void this.beginRecording(focus)
+      void this.beginRecording(focus, translate)
     } else {
       this.setPhase('ready', 'Enable Dictait in System Settings → Privacy & Security → Microphone.')
       this.requestMicrophone()
@@ -426,12 +454,17 @@ export class Coordinator extends EventEmitter {
 
   // MARK: Recording
 
-  private async beginRecording(captured: FocusInfo | null = null): Promise<void> {
+  private async beginRecording(captured: FocusInfo | null = null, translate = false): Promise<void> {
     this.stopMicrophoneTest()
     const token = ++this.recordingToken
     const startedAt = Date.now()
     this.session = randomUUID()
     this.pieces = 0
+    this.translating = translate
+    this.discardAudio()
+    this.audioID = this.session
+    this.audioStartedAt = startedAt
+    this.pieceFailed = false
     this.target = null
     this.practicing = false
     this.audibleFrames = 0
@@ -439,10 +472,10 @@ export class Coordinator extends EventEmitter {
     // Capture before showing the panel. Native shortcut events already carry their snapshot.
     const focus = captured ? Promise.resolve(captured) : this.helper.focus()
     this.targetReady = this.inspectTarget(focus, token)
-    this.setLive({ live: '', note: '', holding: false, holdStartedAt: null, editing: false, appName: '',
+    this.setLive({ live: '', note: '', holding: false, holdStartedAt: null, editing: false, translating: translate, appName: '',
       deliveredTo: null, microphone: '', micQuiet: false })
     this.state.recordingStartedAt = startedAt
-    this.setPhase('recording', `${this.shortcutName} to finish. Escape to cancel.`)
+    this.setPhase('recording', `${this.finishName} to finish. Escape to cancel.`)
     globalShortcut.register('Escape', () => this.cancelRecording())
     if (this.stored.feedbackSounds) playSound('Tink')
     this.holdMedia()
@@ -477,7 +510,7 @@ export class Coordinator extends EventEmitter {
     this.practicing = practicing
     if (!target || token !== this.recordingToken) return
     this.target = target
-    const editing = this.stored.voiceEdits && target.editable === true && !target.secure && target.selected.trim().length > 0
+    const editing = this.stored.voiceEdits && !this.translating && target.editable === true && !target.secure && target.selected.trim().length > 0
     this.setLive({ editing, appName: target.appName })
   }
 
@@ -579,7 +612,7 @@ export class Coordinator extends EventEmitter {
     this.endRecordingSession()
     this.recorder?.cancel()
     this.discardSession()
-    this.deletePendingAudio()
+    this.discardAudio()
     this.setPhase('ready', `Recording cancelled. ${this.shortcutName} to try again.`)
   }
 
@@ -616,10 +649,10 @@ export class Coordinator extends EventEmitter {
   /** A finished piece of speech, cut at a pause: transcribe it now, while the user keeps talking. */
   piece(audio: Buffer, index: number): void {
     if (!this.session || audio.length <= 44) return
-    const file = join(tmpdir(), `dictait-${randomUUID()}.wav`)
     try {
-      writeFileSync(file, audio, { mode: 0o600 })
-      this.pieceFiles.add(file)
+      const file = writePending(this.session, index, audio)
+      this.audioFiles.push(file)
+      this.audioBytes += audio.length
       this.worker.send({ command: 'chunk', id: this.session, index, path: file, ...this.requestOptions() })
       this.pieces++
     } catch (error) {
@@ -637,6 +670,8 @@ export class Coordinator extends EventEmitter {
     return {
       language, cleanup: cleanup && this.cleanupAvailable,
       vocabulary: this.personal.vocabulary.map(({ word, alias }) => ({ word, alias })),
+      snippets: this.personal.snippets.map(({ trigger, content }) => ({ trigger, content })),
+      task: this.translating ? 'translate' : 'transcribe',
       memory: this.practicing ? 'off' : memoryMode, smart_formatting: smartFormatting, writing_style: style,
       examples: learnCorrections ? this.personal.examples.map(({ original, corrected }) => ({ original, corrected })) : [],
       // Text before the cursor never leaves this Mac and is never saved.
@@ -663,7 +698,8 @@ export class Coordinator extends EventEmitter {
   private async stopRecording(): Promise<void> {
     if (this.state.phase !== 'recording') return
     this.endRecordingSession()
-    this.setPhase('transcribing', this.live.editing ? 'Understanding your instruction…' : 'Turning speech into text on this Mac…')
+    this.setPhase('transcribing', this.live.editing ? 'Understanding your instruction…'
+      : this.translating ? 'Translating to English on this Mac…' : 'Turning speech into text on this Mac…')
     // A quick second tap can arrive while the microphone or focus snapshot is opening.
     try { await this.recorderStarting } catch { /* stop reports no audio below */ }
     await this.targetReady
@@ -680,33 +716,66 @@ export class Coordinator extends EventEmitter {
       audio = emptyWAV()
     }
     if (!audio || (audio.length <= 44 && !pieces)) {
-      this.deletePendingAudio()
+      this.discardAudio()
       this.setPhase('ready', 'No audio recorded. Try again.')
       return
     }
-    const file = join(tmpdir(), `dictait-${randomUUID()}.wav`)
-    try { writeFileSync(file, audio, { mode: 0o600 }) } catch (error) {
+    let file: string
+    try { file = writePending(id, 'final', audio) } catch (error) {
       if (pieces) { try { this.worker.send({ command: 'discard', id }) } catch { /* worker gone */ } }
-      this.deletePendingAudio()
-      this.setPhase('failed', `Could not save the recording: ${(error as Error).message}`)
+      this.failRequest(`Could not save the end of the recording: ${(error as Error).message}`)
       return
     }
-    this.pendingAudio = file
+    this.audioFiles.push(file)
+    this.audioBytes += audio.length
+    this.send(id, [{ command: 'transcribe', id, path: file, ...this.requestOptions() }])
+  }
+
+  /** Sends a dictation's work to the worker and watches for it to come back. */
+  private send(id: string, requests: Record<string, unknown>[]): void {
     this.requestID = id
     try {
-      this.worker.send({ command: 'transcribe', id, path: file, ...this.requestOptions() })
+      for (const request of requests) this.worker.send(request)
       this.watchdog = setTimeout(() => {
         if (this.requestID !== id) return
-        this.deletePendingAudio()
-        this.requestID = null
         this.worker.stop()
-        this.setPhase('failed', 'Transcription took too long. Click Retry to reload the models.')
-      }, 180_000)
+        this.failRequest('Transcription took too long')
+      }, 180_000 + (requests.length - 1) * 10_000)
     } catch (error) {
-      this.deletePendingAudio()
-      this.requestID = null
-      this.setPhase('failed', (error as Error).message)
+      this.failRequest((error as Error).message)
     }
+  }
+
+  /** The current dictation failed: keep its audio for a retry and say how to retry it. */
+  private failRequest(message: string): void {
+    this.deliveryToken++
+    this.clearWatchdog()
+    this.requestID = null
+    const reason = message.replace(/\.?\s*Click Retry[^.]*\.?$/, '').replace(/\.$/, '')
+    const kept = this.keepAudio(reason)
+    const retry = shortcutKeys(this.stored.shortcuts.retryLast).join('')
+    this.setPhase('failed', kept ? `${reason}. The recording is saved; ${retry} retries it.` : message)
+    shell.beep()
+  }
+
+  /** Moves the current dictation's audio into Recovery, or updates the kept recording being retried. */
+  private keepAudio(reason: string): boolean {
+    const retried = this.retrying
+    this.retrying = null
+    const files = this.audioFiles
+    this.audioFiles = []
+    const kept = retried
+      ? keepRecording(retried, [], { at: this.audioStartedAt, seconds: 0, reason, translate: this.translating })
+      : files.length && this.audioID ? keepRecording(this.audioID, files,
+        { at: this.audioStartedAt, seconds: audioSeconds(this.audioBytes, files.length), reason, translate: this.translating }) : null
+    if (!kept) removeFiles(files)
+    this.audioBytes = 0
+    this.refreshRecovered()
+    return Boolean(kept)
+  }
+
+  private refreshRecovered(): void {
+    this.update({ recovered: listRecordings() })
   }
 
   private handle(event: WorkerEvent): void {
@@ -725,6 +794,9 @@ export class Coordinator extends EventEmitter {
         const memory = event.memory as { terms?: number } | undefined
         this.update({ notice: typeof event.warning === 'string' ? event.warning : this.state.notice, rememberedTerms: memory?.terms ?? 0, download: null })
         this.setPhase('ready', `${this.shortcutName} to start. Press again to finish.`)
+        const queued = this.queuedRetry
+        this.queuedRetry = null
+        if (queued) void this.retryRecording(queued)
         break
       }
       case 'partial':
@@ -735,18 +807,21 @@ export class Coordinator extends EventEmitter {
         if (event.id !== this.requestID) return
         if (typeof event.raw === 'string' && event.raw) this.setLive({ live: event.raw.slice(-400) })
         if (this.stored.cleanup && this.cleanupAvailable && event.raw) {
-          this.setPhase('cleaning', this.live.editing ? 'Rewriting your selection…' : 'Organizing your words…')
+          this.setPhase('cleaning', this.live.editing ? 'Rewriting your selection…' : this.translating ? 'Translating to English…' : 'Organizing your words…')
         }
         break
       case 'result': {
         if (event.id !== this.requestID) return
         this.clearWatchdog()
         this.requestID = null
-        this.deletePendingAudio()
         const text = typeof event.text === 'string' ? event.text : ''
         const edit = event.mode === 'edit'
         const warning = typeof event.warning === 'string' ? event.warning : ''
+        // A piece that failed left a gap in the text: keep the audio so the whole dictation can be retried.
+        if (this.pieceFailed && text) this.keepAudio('Part of this dictation could not be transcribed')
+        else this.finishAudio()
         if (event.mode === 'followup') { void this.followUp(text, warning); return }
+        if (event.mode === 'undo') { void this.undoLast(); return }
         if (!text) {
           this.setPhase('ready', edit ? `Selection unchanged. ${warning}`.trim()
             : 'No speech detected. Move closer to the microphone and try again.')
@@ -784,23 +859,34 @@ export class Coordinator extends EventEmitter {
         })
         break
       }
-      case 'error':
+      case 'error': {
         if (typeof event.id === 'string' && event.id !== this.requestID) return
-        this.deliveryToken++
-        this.clearWatchdog()
-        this.requestID = null
-        if (this.state.phase === 'recording') { this.recordingToken++; this.endRecordingSession(); this.recorder?.cancel(); this.discardSession() }
-        this.deletePendingAudio()
-        this.setPhase('failed', typeof event.message === 'string' ? event.message : 'Something went wrong. Click Retry.')
-        shell.beep()
+        const message = typeof event.message === 'string' ? event.message : 'Something went wrong. Click Retry.'
+        if (this.state.phase === 'recording') {
+          this.recordingToken++; this.endRecordingSession(); this.recorder?.cancel(); this.discardSession()
+          this.failRequest(message)
+        } else if (this.requestID) {
+          this.failRequest(message)
+        } else {
+          this.deliveryToken++
+          this.clearWatchdog()
+          this.setPhase('failed', message)
+          shell.beep()
+        }
         break
+      }
       case 'memory':
         this.update({ rememberedTerms: typeof event.terms === 'number' ? event.terms : this.state.rememberedTerms })
         this.writeDiagnostics()
         this.emit('archive')
         break
       case 'chunk':
-        if (typeof event.error === 'string') this.update({ notice: `Part of a dictation could not be transcribed: ${event.error}` })
+        // A cancelled recording's pieces can still be queued in the worker; they are not news.
+        if (event.id !== this.session && event.id !== this.requestID) break
+        if (typeof event.error === 'string') {
+          this.pieceFailed = true
+          this.update({ notice: `Part of a dictation could not be transcribed: ${event.error}` })
+        }
         break
       case 'memory_warning':
         this.update({ notice: typeof event.message === 'string' ? event.message : 'Could not update local memory.' })
@@ -909,6 +995,140 @@ export class Coordinator extends EventEmitter {
     if (outcome !== 'pasted') this.update({ notice: 'Copied your dictation. Press Command–V where you want it.' })
     this.setPhase('ready', outcome === 'pasted' ? 'Pasted. Your last dictation is at your current cursor.' : 'Copied. Focus a text box, then press Command–V.')
     this.onToggleRequested()
+  }
+
+  /** "Hey, undo that" or the undo shortcut: removes Dictait's last paste while it is still there, untouched. */
+  async undoLast(fromShortcut = false): Promise<void> {
+    if (fromShortcut && this.state.phase !== 'ready') { shell.beep(); return }
+    const delivery = ++this.deliveryToken
+    this.setLive({ deliveredTo: null })
+    const last = this.lastPasted
+    let message: string
+    if (!last) {
+      message = 'Nothing to undo. Dictait can remove only the text it just pasted.'
+    } else if (!systemPreferences.isTrustedAccessibilityClient(false)) {
+      message = 'Nothing to undo without Accessibility permission. Allow Dictait in Privacy & Security → Accessibility.'
+    } else {
+      let outcome: Replacement
+      try { outcome = await this.helper.replaceLast(last.text, '') } catch { outcome = 'failed' }
+      if (this.deliveryStale(delivery)) return
+      if (outcome === 'replaced') this.lastPasted = null
+      message = outcome === 'replaced' ? 'Removed your last dictation.'
+        : outcome === 'changed' ? 'Your last dictation was edited since, so Dictait left it as it is.'
+          : outcome === 'gone' ? 'Your last dictation isn’t in the focused text box. Click back into it and try again.'
+            : 'Couldn’t remove your last dictation. Press ⌘Z in that app instead.'
+    }
+    this.setPhase('ready', message)
+    if (fromShortcut) this.onToggleRequested()
+  }
+
+  /** Transcribes a kept recording again and delivers it like a new dictation, at the current cursor. */
+  async retryRecording(id?: string): Promise<WordResult> {
+    const recording = id ? this.state.recovered.find((entry) => entry.id === id) : this.state.recovered[0]
+    if (!recording) return { ok: false, feedback: 'There’s no failed dictation to retry.' }
+    if (this.state.phase === 'failed') {
+      // The speech engine stopped with the failure: start it again, then retry.
+      this.queuedRetry = recording.id
+      this.reloadModels()
+      return { ok: true, feedback: 'Reloading the speech engine, then retrying.' }
+    }
+    if (this.state.phase === 'preparing') return { ok: false, feedback: 'The speech engine is still loading. Try again in a moment.' }
+    if (this.state.phase !== 'ready') return { ok: false, feedback: 'Finish the current dictation first, then retry.' }
+    const files = recordingFiles(recording.id)
+    if (!files.length) {
+      deleteRecording(recording.id)
+      this.refreshRecovered()
+      return { ok: false, feedback: 'That recording is no longer on this Mac.' }
+    }
+    this.stopMicrophoneTest()
+    const request = randomUUID()
+    this.retrying = recording.id
+    this.translating = recording.translate
+    this.audioStartedAt = recording.at
+    this.pieceFailed = false
+    this.practicing = false
+    this.recordingWasHold = false
+    this.personal = loadPersonal()
+    this.update({ notice: '' })
+    // Fit the words to where they will go now: its app and the text before its cursor.
+    this.target = await this.helper.focus()
+    this.setLive({ live: '', note: '', editing: false, translating: recording.translate, appName: this.target?.appName ?? '', deliveredTo: null })
+    this.setPhase('transcribing', recording.translate ? 'Translating your saved recording…' : 'Transcribing your saved recording…')
+    const options = this.requestOptions()
+    const pieces = files.slice(0, -1).map((path, index) => ({ command: 'chunk', id: request, index, path, ...options }))
+    this.send(request, [...pieces, { command: 'transcribe', id: request, path: files.at(-1), ...options }])
+    return { ok: true, feedback: 'Retrying your saved recording.' }
+  }
+
+  /** The retry shortcut and the menu: the newest kept recording, with feedback in the island. */
+  async retryFromShortcut(): Promise<void> {
+    const result = await this.retryRecording()
+    if (result.ok) return
+    this.onNotice('Nothing to retry', result.feedback)
+    shell.beep()
+  }
+
+  removeRecording(id: string): WordResult {
+    if (id === this.retrying) return { ok: false, feedback: 'That recording is being transcribed again.' }
+    deleteRecording(id)
+    this.refreshRecovered()
+    return { ok: true, feedback: 'Recording deleted.' }
+  }
+
+  // MARK: Snippets
+
+  /** Adds a snippet, or changes one. Saying a trigger that exists again updates that snippet. */
+  saveSnippet(rawTrigger: string, rawContent: string, replaceId?: string): WordResult {
+    const trigger = rawTrigger.trim().replace(/\s+/g, ' ')
+    const content = rawContent.replace(/\s+$/, '')
+    if (!/[\p{L}\p{N}]/u.test(trigger)) return { ok: false, feedback: 'Type the words you’ll say.' }
+    if (trigger.length > TRIGGER_CHARS) return { ok: false, feedback: `Keep what you say under ${TRIGGER_CHARS} characters.` }
+    if (/^hey\b/i.test(trigger)) return { ok: false, feedback: 'Start with a word other than “hey”, which Dictait keeps for instructions.' }
+    if (!content.trim()) return { ok: false, feedback: 'Type the text Dictait should paste.' }
+    if (content.length > SNIPPET_CHARS) return { ok: false, feedback: `Keep a snippet under ${SNIPPET_CHARS.toLocaleString('en-US')} characters.` }
+    const personal = loadPersonal()
+    const target = replaceId ? personal.snippets.find((entry) => entry.id === replaceId) : undefined
+    const duplicate = personal.snippets.find((entry) => entry.id !== target?.id && triggerKey(entry.trigger) === triggerKey(trigger))
+    const existing = target ?? duplicate
+    if (existing) {
+      existing.trigger = trigger
+      existing.content = content
+      if (target && duplicate) personal.snippets = personal.snippets.filter((entry) => entry.id !== duplicate.id)
+      return this.saveSnippets(personal, `Updated “${trigger}”.`)
+    }
+    if (personal.snippets.length >= SNIPPET_LIMIT) return { ok: false, feedback: `Dictait keeps up to ${SNIPPET_LIMIT} snippets.` }
+    personal.snippets.push({ id: newID(), trigger, content })
+    return this.saveSnippets(personal, `Added “${trigger}”. Say it in your next dictation.`)
+  }
+
+  removeSnippet(id: string): WordResult {
+    const personal = loadPersonal()
+    const entry = personal.snippets.find((item) => item.id === id)
+    personal.snippets = personal.snippets.filter((item) => item.id !== id)
+    return this.saveSnippets(personal, entry ? `Removed “${entry.trigger}”.` : 'Snippet removed.')
+  }
+
+  restoreSnippet(entry: Snippet, index: number): WordResult {
+    const personal = loadPersonal()
+    if (personal.snippets.some((item) => item.id === entry.id)) return { ok: true, feedback: '' }
+    if (personal.snippets.length >= SNIPPET_LIMIT) return { ok: false, feedback: `Dictait keeps up to ${SNIPPET_LIMIT} snippets.` }
+    if (!entry.trigger.trim() || !entry.content.trim() || entry.trigger.length > TRIGGER_CHARS || entry.content.length > SNIPPET_CHARS) {
+      return { ok: false, feedback: 'That snippet can’t be restored.' }
+    }
+    personal.snippets.splice(Math.max(0, Math.min(index, personal.snippets.length)), 0,
+      { id: entry.id || newID(), trigger: entry.trigger, content: entry.content })
+    return this.saveSnippets(personal, `Restored “${entry.trigger}”.`)
+  }
+
+  private saveSnippets(personal: Personalization, feedback: string): WordResult {
+    try {
+      savePersonal(personal)
+      this.personal = personal
+      this.update({ snippets: personal.snippets })
+      return { ok: true, feedback }
+    } catch (error) {
+      return { ok: false, feedback: `Could not save your snippets: ${(error as Error).message}` }
+    }
   }
 
   // MARK: Permissions and settings
@@ -1122,12 +1342,20 @@ export class Coordinator extends EventEmitter {
     this.watchdog = null
   }
 
-  private deletePendingAudio(): void {
-    for (const file of [this.pendingAudio, ...this.pieceFiles]) {
-      if (file) { try { unlinkSync(file) } catch { /* already removed by the worker */ } }
-    }
-    this.pendingAudio = null
-    this.pieceFiles.clear()
+  /** Deletes the current dictation's audio: it was cancelled, or its words came back. */
+  private discardAudio(): void {
+    removeFiles(this.audioFiles)
+    this.audioFiles = []
+    this.audioBytes = 0
+  }
+
+  /** The dictation came back, so its audio is no longer needed; a retried recording is done with. */
+  private finishAudio(): void {
+    this.discardAudio()
+    if (!this.retrying) return
+    deleteRecording(this.retrying)
+    this.retrying = null
+    this.refreshRecovered()
   }
 
   shutdown(): void {
@@ -1140,11 +1368,18 @@ export class Coordinator extends EventEmitter {
     if (this.mediaHeld) { this.helper.releaseMediaNow(this.mediaHeld); this.mediaHeld = null }
     if (this.capturing) clearTimeout(this.capturing)
     this.recorder?.cancel()
-    this.deletePendingAudio()
+    // Words still on their way, or a long dictation cut short: keep the audio for a retry next time.
+    if ((this.requestID || this.state.phase === 'recording') && this.audioFiles.length) this.keepAudio('Dictait quit before this dictation finished')
+    else this.discardAudio()
     globalShortcut.unregisterAll()
     this.helper.stop()
     this.worker.stop()
   }
+}
+
+/** Triggers are the same when their words are, whatever the case or punctuation (as the worker matches them). */
+function triggerKey(trigger: string): string {
+  return (trigger.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).join(' ')
 }
 
 /**

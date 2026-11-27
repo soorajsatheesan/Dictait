@@ -6,7 +6,7 @@ export const MAX_DICTATION_SECONDS = 30 * 60
 export const HOLD_TO_TALK_MS = 1200
 
 export type Phase = 'preparing' | 'ready' | 'requestingMicrophone' | 'recording' | 'transcribing' | 'cleaning' | 'failed'
-export type Section = 'notes' | 'graph' | 'vocabulary' | 'settings' | 'practice'
+export type Section = 'notes' | 'graph' | 'vocabulary' | 'snippets' | 'settings' | 'practice'
 export type Appearance = 'system' | 'light' | 'dark'
 export type MemoryMode = 'notes' | 'terms' | 'off'
 export type Backend = 'whisper' | 'parakeet'
@@ -114,6 +114,29 @@ export interface VocabularyEntry {
   learned?: boolean
 }
 
+/** Say the trigger, get the content, exactly as saved. */
+export interface Snippet {
+  id: string
+  trigger: string
+  content: string
+}
+
+export const SNIPPET_LIMIT = 100
+export const SNIPPET_CHARS = 2000
+export const TRIGGER_CHARS = 60
+
+/** The audio of a dictation that failed, kept on this Mac so it can be retried. */
+export interface RecoveredRecording {
+  id: string
+  /** When it was recorded, in milliseconds since the epoch. */
+  at: number
+  seconds: number
+  /** What went wrong, in plain words. */
+  reason: string
+  /** Recorded with the translate shortcut, so a retry translates too. */
+  translate: boolean
+}
+
 export interface CorrectionExample {
   id: string
   original: string
@@ -141,6 +164,9 @@ export interface AppState {
   rememberedTerms: number
   settings: Settings
   vocabulary: VocabularyEntry[]
+  snippets: Snippet[]
+  /** Failed dictations whose audio is kept for a retry, newest first. */
+  recovered: RecoveredRecording[]
   history: HistoryEntry[]
   download: Download | null
   update: UpdateStatus
@@ -203,10 +229,12 @@ export interface HudState {
   holdStartedAt: number | null
   /** Rewriting the selected text rather than dictating. */
   editing: boolean
+  /** Recording with the translate shortcut: the words are pasted in English. */
+  translating: boolean
   destination: Destination | null
   microphone: string
   micQuiet: boolean
-  /** The dictation shortcut as keycaps, e.g. "⌃ Space" or "Right ⌘". */
+  /** The shortcut that finishes this recording as keycaps, e.g. "⌃ Space" or "Right ⌘". */
   shortcut: string
 }
 
@@ -248,6 +276,12 @@ export interface DictaitAPI {
   addWord(word: string, alias: string, replaceId?: string): Promise<WordResult>
   removeWord(id: string): Promise<WordResult>
   restoreWord(entry: VocabularyEntry, index: number): Promise<WordResult>
+  saveSnippet(trigger: string, content: string, replaceId?: string): Promise<WordResult>
+  removeSnippet(id: string): Promise<WordResult>
+  restoreSnippet(entry: Snippet, index: number): Promise<WordResult>
+  /** Transcribe a kept recording again and deliver it like a new dictation. */
+  retryRecording(id: string): Promise<WordResult>
+  deleteRecording(id: string): Promise<WordResult>
   openFolder(which: 'notes' | 'memory'): void
   microphones(): Promise<Microphone[]>
   suggestions(): Promise<Suggestion[]>

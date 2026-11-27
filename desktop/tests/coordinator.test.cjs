@@ -12,9 +12,34 @@ const code = buildSync({
   alias: { '@shared': path.join(__dirname, '../src/shared') }
 }).outputFiles[0].text
 
+/** Files in memory: enough of node:fs for settings, personalization and kept recordings. */
+function fakeFS(files, dirs, now, spawnWorker) {
+  const missing = (path) => Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
+  return {
+    readFileSync: (file) => files.get(file) ?? '{}',
+    writeFileSync: (file, value) => files.set(file, typeof value === 'string' ? value : Buffer.from(value)),
+    mkdirSync: (dir) => { for (let path = dir; path && path !== '/'; path = path.slice(0, path.lastIndexOf('/'))) dirs.add(path) },
+    readdirSync: (dir) => {
+      const names = new Set([...files.keys(), ...dirs].filter((path) => path.startsWith(dir + '/')).map((path) => path.slice(dir.length + 1).split('/')[0]))
+      if (!names.size && !dirs.has(dir)) throw missing(dir)
+      return [...names]
+    },
+    rmSync: (target) => {
+      for (const path of [...files.keys()]) if (path === target || path.startsWith(target + '/')) files.delete(path)
+      for (const path of [...dirs]) if (path === target || path.startsWith(target + '/')) dirs.delete(path)
+    },
+    unlinkSync: (file) => { if (!files.delete(file)) throw missing(file) },
+    statSync: (file) => { if (!files.has(file)) throw missing(file); return { size: files.get(file).length, mtimeMs: now() } },
+    chmodSync() {},
+    renameSync: (from, to) => { if (!files.has(from)) throw missing(from); files.set(to, files.get(from)); files.delete(from) },
+    constants: { X_OK: 1 }, accessSync() {}, existsSync: (file) => Boolean(spawnWorker && file.endsWith('/worker.py')),
+    openSync: () => 1, closeSync() {}
+  }
+}
+
 function fixture(t, spawnWorker) {
   const timers = new Map()
-  const files = new Map(), sounds = []
+  const files = new Map(), dirs = new Set(), sounds = []
   let now = 10_000, nextTimer = 0, pasteCount = 0, clipboardText = ''
   const electron = {
     app: { getVersion: () => 'test', getLoginItemSettings: () => ({}), getAppPath: () => path.join(__dirname, '..'), isPackaged: false },
@@ -32,10 +57,7 @@ function fixture(t, spawnWorker) {
     clearInterval: (id) => timers.delete(id),
     require: (name) => {
       if (name === 'electron') return electron
-      if (name === 'node:fs') return { readFileSync: (file) => files.get(file) ?? '{}', writeFileSync: (file, value) => files.set(file, String(value)), mkdirSync() {},
-        constants: { X_OK: 1 }, accessSync() {}, existsSync: (file) => Boolean(spawnWorker && file.endsWith('/worker.py')),
-        openSync: () => 1, closeSync() {},
-        renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) } }
+      if (name === 'node:fs') return fakeFS(files, dirs, () => now, spawnWorker)
       if (name === 'node:child_process') return { spawn: (...args) => {
         if (spawnWorker && args[0].endsWith('/bin/python')) return spawnWorker(...args)
         sounds.push(args)
@@ -573,9 +595,182 @@ test('recording a new shortcut pauses the current ones until it is saved or canc
   assert.equal(f.registrations.at(-1).length, 0)
   f.model.captureShortcut(false)
   await f.flush()
-  assert.equal(f.registrations.at(-1).length, 3)
+  assert.equal(f.registrations.at(-1).length, 6)
   f.model.captureShortcut(true)
   f.advance(30_000)
   await f.flush()
-  assert.equal(f.registrations.at(-1).length, 3)
+  assert.equal(f.registrations.at(-1).length, 6)
+})
+
+
+/** A recorded dictation with one piece and a final tail, waiting for the worker. */
+async function dictate(f, { translate = false } = {}) {
+  const sent = []
+  f.model.worker.send = (message) => sent.push(message)
+  f.model.hotkey(translate ? 'translate' : 'dictate', true); f.model.hotkey(translate ? 'translate' : 'dictate', false)
+  await f.flush()
+  f.model.piece(Buffer.alloc(32_044), 0)
+  f.model.recorder.stop = async () => Buffer.alloc(16_044)
+  f.advance(600)
+  f.model.hotkey(translate ? 'translate' : 'dictate', true); f.model.hotkey(translate ? 'translate' : 'dictate', false)
+  await f.flush()
+  return { sent, request: sent.find((message) => message.command === 'transcribe') }
+}
+
+const wavs = (f) => [...f.files.keys()].filter((file) => file.endsWith('.wav'))
+
+test('a dictation whose words come back deletes its audio', async (t) => {
+  const f = fixture(t)
+  const { request } = await dictate(f)
+  assert.equal(wavs(f).length, 2)
+  assert.ok(wavs(f).every((file) => file.includes('/Dictait/Recovery/pending/')))
+  f.model.handle({ event: 'result', id: request.id, text: 'Hello there.' })
+  await f.flush()
+  assert.deepEqual(wavs(f), [])
+  assert.deepEqual(Array.from(f.model.state.recovered), [])
+})
+
+test('a failed dictation keeps its audio privately and says how to retry it', async (t) => {
+  const f = fixture(t)
+  const { request } = await dictate(f)
+  f.model.handle({ event: 'error', id: request.id, message: 'Expected mono 16 kHz audio.' })
+  assert.equal(f.model.state.phase, 'failed')
+  assert.match(f.model.state.message, /^Expected mono 16 kHz audio\. The recording is saved; ⌃⌥R retries it\.$/)
+  const [kept] = f.model.state.recovered
+  assert.equal(kept.reason, 'Expected mono 16 kHz audio')
+  assert.equal(kept.seconds, 1.5)
+  assert.deepEqual(wavs(f).map((file) => file.split('/Recovery/')[1]), [`${kept.id}/00000.wav`, `${kept.id}/00001.wav`])
+})
+
+test('a timed-out or crashed worker keeps the recording too', async (t) => {
+  const f = fixture(t)
+  let stopped = 0
+  f.model.worker.stop = () => { stopped++ }
+  await dictate(f)
+  f.advance(181_000)
+  assert.equal(stopped, 1)
+  assert.equal(f.model.state.phase, 'failed')
+  assert.match(f.model.state.message, /^Transcription took too long\. The recording is saved/)
+  assert.equal(f.model.state.recovered.length, 1)
+
+  const g = fixture(t)
+  await dictate(g)
+  g.model.handle({ event: 'error', message: 'The model worker stopped. Click Retry to reload models.' })
+  assert.match(g.model.state.message, /^The model worker stopped\. The recording is saved/)
+  assert.equal(g.model.state.recovered.length, 1)
+})
+
+test('retrying a kept recording sends its pieces again, delivers the words and deletes it', async (t) => {
+  const f = fixture(t)
+  const { request } = await dictate(f, { translate: true })
+  f.model.handle({ event: 'error', id: request.id, message: 'Out of memory.' })
+  const [kept] = f.model.state.recovered
+  assert.equal(kept.translate, true)
+  f.model.state.phase = 'ready'
+  const sent = []
+  f.model.worker.send = (message) => sent.push(message)
+  assert.equal((await f.model.retryRecording()).ok, true)
+  assert.deepEqual(sent.map((message) => [message.command, message.path.split('/Recovery/')[1], message.task]),
+    [['chunk', `${kept.id}/00000.wav`, 'translate'], ['transcribe', `${kept.id}/00001.wav`, 'translate']])
+  assert.equal(f.model.state.phase, 'transcribing')
+  f.model.handle({ event: 'result', id: sent[1].id, text: 'I will be there by six.' })
+  await f.flush()
+  assert.equal(f.pasteCount(), 1)
+  assert.match(f.model.state.message, /^Pasted\./)
+  assert.deepEqual(Array.from(f.model.state.recovered), [])
+  assert.deepEqual(wavs(f), [])
+})
+
+test('a retry that fails again keeps one recording; a stopped engine reloads first', async (t) => {
+  const f = fixture(t)
+  const { request } = await dictate(f)
+  f.model.handle({ event: 'error', id: request.id, message: 'First failure.' })
+  f.model.state.phase = 'ready'
+  const sent = []
+  f.model.worker.send = (message) => sent.push(message)
+  await f.model.retryRecording()
+  f.model.handle({ event: 'error', id: sent.at(-1).id, message: 'Second failure.' })
+  assert.equal(f.model.state.recovered.length, 1)
+  assert.equal(f.model.state.recovered[0].reason, 'Second failure')
+  let reloads = 0
+  f.model.reloadModels = () => { reloads++ }
+  assert.equal((await f.model.retryRecording()).ok, true)
+  assert.equal(reloads, 1)
+  f.model.handle({ event: 'ready', cleanup: true })
+  await f.flush()
+  assert.equal(f.model.state.phase, 'transcribing')
+  assert.equal(f.model.removeRecording(f.model.state.recovered[0].id).ok, false)
+})
+
+test('cancelling deletes the audio, and late piece errors from it are ignored', async (t) => {
+  const f = fixture(t)
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  const session = f.model.session
+  f.model.piece(Buffer.alloc(32_044), 0)
+  f.model.cancelRecording()
+  assert.deepEqual(wavs(f), [])
+  f.model.handle({ event: 'chunk', id: session, index: 0, words: 0, error: 'No such file' })
+  assert.equal(f.model.state.notice, '')
+  assert.deepEqual(Array.from(f.model.state.recovered), [])
+})
+
+test('the translate shortcut records a translation and says so', async (t) => {
+  const f = fixture(t)
+  f.model.hotkey('translate', true); f.model.hotkey('translate', false)
+  await f.flush()
+  assert.equal(f.model.state.phase, 'recording')
+  assert.equal(f.model.live.translating, true)
+  assert.match(f.model.state.message, /^Control–Shift–Space to finish/)
+  assert.equal(f.model.requestOptions().task, 'translate')
+  f.model.cancelRecording()
+  f.advance(300)
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  assert.equal(f.model.live.translating, false)
+  assert.equal(f.model.requestOptions().task, 'transcribe')
+  f.model.cancelRecording()
+})
+
+test('"hey, undo that" removes the last paste only while it is untouched', async (t) => {
+  const f = fixture(t)
+  const calls = []
+  f.model.helper.replaceLast = async (...args) => { calls.push(args); return 'replaced' }
+  f.model.lastPasted = { text: ' Sent the invoice.', at: 10_000 }
+  f.model.requestID = 'undo'
+  f.model.handle({ event: 'result', id: 'undo', text: '', mode: 'undo' })
+  await f.flush()
+  assert.deepEqual(calls, [[' Sent the invoice.', '']])
+  assert.equal(f.model.state.message, 'Removed your last dictation.')
+  assert.equal(f.model.lastPasted, null)
+  await f.model.undoLast(true)
+  assert.match(f.model.state.message, /^Nothing to undo/)
+  assert.equal(calls.length, 1)
+
+  f.model.lastPasted = { text: 'Edited since', at: 10_000 }
+  f.model.helper.replaceLast = async () => 'changed'
+  await f.model.undoLast(true)
+  assert.match(f.model.state.message, /edited since/)
+  assert.equal(f.model.lastPasted.text, 'Edited since')
+})
+
+test('snippets are validated, updated by trigger and bounded', async (t) => {
+  const f = fixture(t)
+  assert.equal(f.model.saveSnippet('my calendly', 'https://calendly.com/maya').ok, true)
+  assert.equal(f.model.saveSnippet('My  Calendly!', 'https://calendly.com/maya/30min').ok, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(f.model.state.snippets.map((entry) => [entry.trigger, entry.content]))), [['My Calendly!', 'https://calendly.com/maya/30min']])
+  assert.equal(f.model.saveSnippet('hey there', 'x').ok, false)
+  assert.equal(f.model.saveSnippet('...', 'x').ok, false)
+  assert.equal(f.model.saveSnippet('sig', '   ').ok, false)
+  assert.equal(f.model.saveSnippet('long', 'x'.repeat(2001)).ok, false)
+  for (let i = 1; i < 100; i++) assert.equal(f.model.saveSnippet(`snippet ${i}`, 'text').ok, true)
+  assert.equal(f.model.saveSnippet('one more', 'text').ok, false)
+  const first = f.model.state.snippets[0]
+  assert.equal(f.model.removeSnippet(first.id).ok, true)
+  assert.equal(f.model.restoreSnippet(first, 0).ok, true)
+  assert.equal(f.model.state.snippets[0].id, first.id)
+  f.model.hotkey('dictate', true); f.model.hotkey('dictate', false)
+  await f.flush()
+  assert.equal(f.model.requestOptions().snippets.length, 100)
+  f.model.cancelRecording()
 })

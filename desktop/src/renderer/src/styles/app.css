@@ -317,6 +317,31 @@ q { quotes: '“' '”'; }
 .word-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
 .word-card:hover .word-actions, .word-card:focus-within .word-actions { opacity: 1; }
 
+/* ---------- Snippets ---------- */
+
+.snippet-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: start; gap: 10px; }
+.field textarea { min-height: 96px; padding: 9px 12px; border: 0; border-radius: 8px; resize: vertical; font-size: 13.5px; line-height: 1.5; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow 0.15s, background-color 0.15s; }
+.field textarea::placeholder { color: var(--text-3); }
+.field textarea:focus { background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.snippet-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.snippet-foot .teach-preview { flex: 1; margin: 0; }
+.snippet-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.snippet-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.snippet-card { align-items: flex-start; }
+.snippet-content { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; font-size: 12.5px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; color: var(--text-2); }
+
+/* ---------- Recovered recordings ---------- */
+
+.notes-empty { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.notes-empty > .recovered { width: 100%; max-width: 420px; margin: 24px auto 0; }
+.recovered { padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.recovered-row { display: flex; flex-direction: column; gap: 6px; padding: 11px 14px 12px; border-radius: 9px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+.recovered-row + .recovered-row { margin-top: 6px; }
+.recovered-reason { font-size: 13px; line-height: 1.45; color: var(--text); }
+.recovered-actions { display: flex; gap: 6px; }
+.recovered-note { margin: 10px 14px 4px; font-size: 12px; line-height: 1.5; color: var(--text-3); }
+.recovered-note .keys { vertical-align: -3px; }
+
 /* ---------- Settings ---------- */
 
 .settings-inner { display: flex; flex-direction: column; gap: 28px; max-width: 760px; margin: 0 auto; padding: 28px 32px 56px; }

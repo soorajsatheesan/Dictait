@@ -89,3 +89,20 @@ test('the menu fills empty slots with saved dictations while Notes is enabled', 
   assert.deepEqual(labels(await tray.open()), ['Copy “Current dictation”'])
   assert.equal(reads, 2)
 })
+
+test('a kept recording can be retried from the menu bar', async () => {
+  let retries = 0
+  const model = {
+    state: { phase: 'ready', message: 'Ready', history: [], recovered: [] },
+    stored: {},
+    refreshPermissions() {},
+    async retryFromShortcut() { retries++ }
+  }
+  const tray = trayFixture(model)
+  assert.equal(Array.from(await tray.open()).some((item) => item.label === 'Retry last failed dictation'), false)
+  model.state.recovered = [{ id: 'a', at: 1, seconds: 4, reason: 'Transcription took too long', translate: false }]
+  const item = Array.from(await tray.open()).find((entry) => entry.label === 'Retry last failed dictation')
+  assert.equal(item.enabled, true)
+  item.click()
+  assert.equal(retries, 1)
+})

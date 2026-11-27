@@ -115,12 +115,17 @@ func postKey(_ code: CGKeyCode, flags: CGEventFlags, pid: pid_t? = nil) -> Bool 
 }
 
 func paste(pid: pid_t? = nil) -> Bool {
+    press(9, flags: .maskCommand, pid: pid)
+}
+
+/// A key press for the app that owns the focused field.
+func press(_ code: CGKeyCode, flags: CGEventFlags, pid: pid_t? = nil) -> Bool {
     guard AXIsProcessTrusted() else { return false }
     // Use HID event tap for the frontmost app (sandboxed/Electron/terminal apps can ignore postToPid);
     // use postToPid only for non-activating panels whose PID differs from frontmostApplication.
     let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     let targetPid = (pid != nil && pid != frontPid) ? pid : nil
-    let posted = postKey(9, flags: .maskCommand, pid: targetPid)
+    let posted = postKey(code, flags: flags, pid: targetPid)
     usleep(15_000)
     return posted
 }
@@ -640,8 +645,30 @@ func replaceLast(expected: String, replacement: String) -> [String: Any] {
     guard let last = lastInsertion, let range = last.range, let element = last.element,
           isFocused(element, last) else { return ["outcome": "gone"] }
     guard squashed(text(element, in: range) ?? "") == squashed(expected) else { return ["outcome": "changed"] }
+    if replacement.isEmpty {
+        let removed = remove(range, from: element, of: last)
+        return ["outcome": removed ? "replaced" : "failed", "destination": removed ? applicationInfo(last.pid) : NSNull()]
+    }
     let pasted = paste(replacement, into: element, of: last, at: range)
     return ["outcome": pasted ? "replaced" : "failed", "destination": pasted ? applicationInfo(last.pid) : NSNull()]
+}
+
+/// "Undo that": select the last insertion and press Delete, which every text field handles
+/// (pasting an empty clipboard does nothing in many apps). Only a selection that is exactly the
+/// insertion is deleted; the text must then be gone.
+func remove(_ range: CFRange, from element: AXUIElement, of target: Place) -> Bool {
+    guard setSelectedRange(element, range) else { return false }
+    usleep(30_000)
+    guard isFocused(element, target), let selected = selectedRange(element),
+          selected.location == range.location, selected.length == range.length else { return false }
+    let before = characterCount(element)
+    guard press(51, flags: [], pid: target.pid) else { return false }
+    let removed = wait(0.8) {
+        if let before, let now = characterCount(element) { return now <= before - range.length }
+        return selectedRange(element).map { $0.location == range.location && $0.length == 0 } ?? false
+    }
+    if removed { lastInsertion = nil }
+    return removed
 }
 
 // MARK: - Microphones

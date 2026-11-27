@@ -1,7 +1,7 @@
 import { app, ipcMain, Menu, nativeTheme, session, shell, type MenuItemConstructorOptions } from 'electron'
 import { join } from 'node:path'
-import type { ShortcutAction } from '@shared/shortcuts'
-import type { Appearance, Section, Settings, Tones, VocabularyEntry } from '@shared/types'
+import { DEFAULT_SHORTCUTS, type ShortcutAction } from '@shared/shortcuts'
+import type { Appearance, Section, Settings, Snippet, Tones, VocabularyEntry } from '@shared/types'
 import { readArchive } from './archive'
 import { Coordinator, openPrivacy } from './coordinator'
 import { DesktopWindow } from './desktop'
@@ -101,7 +101,8 @@ function launch(): void {
   clearQuarantine()
   model.start()
   updater.start()
-  model.promptAccessibilityOnce()
+  // Setup asks for Accessibility on its own step; a system prompt over its welcome screen would only confuse.
+  if (model.stored.setupDone) model.promptAccessibilityOnce()
   status.update()
 
   app.on('second-instance', () => desktop.show())
@@ -147,7 +148,7 @@ function registerIPC(model: Coordinator, desktop: DesktopWindow, updater: Update
   ipcMain.on('login:open', () => void shell.openExternal('x-apple.systempreferences:com.apple.LoginItems-Settings.extension'))
   ipcMain.on('shortcut:retry', () => void model.registerShortcut())
   ipcMain.handle('shortcut:set', (_event, action: unknown, shortcut: unknown) =>
-    typeof action === 'string' && ['dictate', 'pasteLast', 'learnCorrection'].includes(action)
+    typeof action === 'string' && Object.hasOwn(DEFAULT_SHORTCUTS, action)
       ? model.setShortcut(action as ShortcutAction, shortcut) : { ok: false, feedback: 'Unknown shortcut.' })
   ipcMain.on('shortcut:capture', (_event, active: unknown) => model.captureShortcut(active === true))
   ipcMain.on('permission:microphone', () => model.requestMicrophone())
@@ -166,6 +167,13 @@ function registerIPC(model: Coordinator, desktop: DesktopWindow, updater: Update
   ipcMain.handle('vocabulary:remove', (_event, id: string) => model.removeWord(String(id)))
   ipcMain.handle('vocabulary:restore', (_event, entry: VocabularyEntry, index: number) =>
     model.restoreWord({ id: String(entry.id), word: String(entry.word), alias: String(entry.alias ?? ''), learned: Boolean(entry.learned) }, Number(index) || 0))
+  ipcMain.handle('snippets:save', (_event, trigger: unknown, content: unknown, replaceId?: unknown) =>
+    model.saveSnippet(String(trigger ?? ''), String(content ?? ''), typeof replaceId === 'string' ? replaceId : undefined))
+  ipcMain.handle('snippets:remove', (_event, id: unknown) => model.removeSnippet(String(id)))
+  ipcMain.handle('snippets:restore', (_event, entry: Snippet, index: unknown) =>
+    model.restoreSnippet({ id: String(entry?.id ?? ''), trigger: String(entry?.trigger ?? ''), content: String(entry?.content ?? '') }, Number(index) || 0))
+  ipcMain.handle('recovery:retry', (_event, id: unknown) => model.retryRecording(String(id)))
+  ipcMain.handle('recovery:delete', (_event, id: unknown) => model.removeRecording(String(id)))
   ipcMain.on('folder:open', (_event, which: 'notes' | 'memory') => openFolder(which === 'notes' ? 'notes' : 'memory'))
   ipcMain.handle('microphones:list', () => model.microphones())
   ipcMain.handle('vocabulary:suggestions', () => model.suggestions())
@@ -224,7 +232,7 @@ function configureMenu(desktop: DesktopWindow): void {
     { role: 'editMenu' },
     {
       label: 'View', submenu: [
-        go('notes', 'Cmd+1'), go('graph', 'Cmd+2'), go('vocabulary', 'Cmd+3'), go('settings', 'Cmd+4'), go('practice', 'Cmd+5'),
+        go('notes', 'Cmd+1'), go('graph', 'Cmd+2'), go('vocabulary', 'Cmd+3'), go('snippets', 'Cmd+4'), go('settings', 'Cmd+5'), go('practice', 'Cmd+6'),
         { type: 'separator' },
         ...(app.isPackaged ? [] : [{ role: 'reload' } as const, { role: 'toggleDevTools' } as const, { type: 'separator' } as const]),
         { role: 'togglefullscreen' }
